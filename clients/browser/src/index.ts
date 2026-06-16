@@ -156,6 +156,3 @@ export type {
   TerminalOptions,
   TerminalSessionInfo,
 } from './server/index.js';
-
-export * from '@camera.ui/sdk';
-export * from '@camera.ui/sdk/internal';
