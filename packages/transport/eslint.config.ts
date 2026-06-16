@@ -11,15 +11,7 @@ export default [
   },
   {
     name: 'files-to-ignore',
-    ignores: [
-      '**/dist/**',
-      '**/demo/**',
-      '**/coverage/**',
-      '**/node_modules/**',
-      'eslint.config.ts',
-      'vite.config.ts',
-      'vitest.config.ts',
-    ],
+    ignores: ['**/dist/**', '**/demo/**', '**/coverage/**', '**/node_modules/**', 'eslint.config.ts', 'vite.config.ts', 'vitest.config.ts', 'updates.config.js'],
   },
   jsLint.configs.recommended,
   ...tsLint.configs.recommended,
