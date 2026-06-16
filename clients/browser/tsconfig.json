@@ -1,0 +1,39 @@
+{
+  "compilerOptions": {
+    "rootDir": "../../..",
+    "outDir": "./dist",
+    "module": "ESNext",
+    "target": "es2024",
+    "moduleResolution": "Bundler",
+    "lib": [
+      "ES2024",
+      "DOM"
+    ],
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "strict": true,
+    "esModuleInterop": true,
+    "preserveConstEnums": true,
+    "skipLibCheck": true,
+    "useUnknownInCatchVariables": false,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "experimentalDecorators": true,
+    "emitDecoratorMetadata": true,
+    "verbatimModuleSyntax": true,
+    "noImplicitAny": true,
+    "types": [
+      "node",
+      "@types/webrtc",
+      "@webgpu/types"
+    ],
+  },
+  "include": [
+    "src/**/*"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
+}

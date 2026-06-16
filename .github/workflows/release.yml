@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "*-v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Resolve package + version from tag
+        id: meta
+        run: |
+          TAG="${GITHUB_REF_NAME}"            # e.g. browser-v0.0.112
+          PKG="${TAG%-v*}"                    # browser
+          VERSION="${TAG##*-v}"               # 0.0.112
+          case "$PKG" in
+            browser)   DIR="clients/browser";    NAME="@camera.ui/browser" ;;
+            transport) DIR="packages/transport"; NAME="@camera.ui/transport" ;;
+            *) echo "::error::Unknown package '$PKG' in tag '$TAG'"; exit 1 ;;
+          esac
+          echo "pkg=$PKG"        >> "$GITHUB_OUTPUT"
+          echo "dir=$DIR"        >> "$GITHUB_OUTPUT"
+          echo "name=$NAME"      >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing $NAME @ $VERSION ($DIR)"
+
+      - name: Init submodules
+        run: |
+          git submodule update --init --depth 1 externals/rpc externals/sdk externals/nats.js
+          git config url."https://x-access-token:${{ secrets.CAMERA_UI_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --depth 1 externals/camera.ui
+          git config --unset url."https://x-access-token:${{ secrets.CAMERA_UI_TOKEN }}@github.com/".insteadOf || true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Verify tag version matches package.json
+        run: |
+          PKG_VERSION="$(node -p "require('./${{ steps.meta.outputs.dir }}/package.json').version")"
+          echo "tag=${{ steps.meta.outputs.version }} package.json=$PKG_VERSION"
+          if [ "${{ steps.meta.outputs.version }}" != "$PKG_VERSION" ]; then
+            echo "::error::tag version ${{ steps.meta.outputs.version }} != package.json $PKG_VERSION"
+            exit 1
+          fi
+
+      - name: Install
+        run: npm ci
+
+      - name: Build (externals → transport → browser)
+        run: npm run build
+
+      - name: Test
+        run: npm test -w ${{ steps.meta.outputs.name }} --if-present
+
+      - name: Publish to npm (OIDC + provenance)
+        working-directory: ${{ steps.meta.outputs.dir }}
+        run: |
+          npm install -g npm@latest
+          npm publish --provenance --access public

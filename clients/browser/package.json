@@ -1,0 +1,82 @@
+{
+  "name": "@camera.ui/browser",
+  "version": "0.0.111",
+  "description": "camera.ui browser client",
+  "author": "seydx (https://github.com/cameraui/clients)",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "rimraf dist && vite build",
+    "build:types": "vue-tsc --noEmit --declaration false --declarationMap false",
+    "dev": "vite build --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write 'src/' --ignore-unknown --no-error-on-unmatched-pattern",
+    "lint": "eslint .",
+    "lint:fix": "eslint --fix .",
+    "update": "updates --update ./",
+    "install-updates": "npm i --save",
+    "prepublishOnly": "npm i --package-lock-only && npm run lint:fix && npm run format && npm run build"
+  },
+  "peerDependencies": {
+    "@camera.ui/transport": ">=0.0.1",
+    "@vueuse/core": ">=14.3.0",
+    "vue": ">=3.5.34 <3.5.34"
+  },
+  "dependencies": {
+    "@camera.ui/rpc": "file:../../externals/rpc/node"
+  },
+  "devDependencies": {
+    "@camera.ui/sdk": "file:../../externals/sdk/node",
+    "@camera.ui/transport": "file:../../packages/transport",
+    "@eneris/push-receiver": "^4.3.1",
+    "@microsoft/api-extractor": "^7.58.9",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@types/webrtc": "^0.0.47",
+    "@typescript-eslint/parser": "^8.61.0",
+    "@vitejs/plugin-vue": "^6.0.7",
+    "@vue/eslint-config-prettier": "^10.2.0",
+    "@vue/eslint-config-typescript": "^14.8.0",
+    "@vue/language-core": "^3.1.5",
+    "@vue/tsconfig": "^0.9.1",
+    "@vueuse/core": "^14.3.0",
+    "@webgpu/types": "^0.1.70",
+    "eslint": "9.39.2",
+    "globals": "^17.6.0",
+    "prettier": "^3.8.4",
+    "rimraf": "^6.1.3",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.61.0",
+    "unplugin-dts": "^1.0.2",
+    "updates": "^17.18.0",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.8",
+    "vue": "^3.5.38",
+    "vue-tsc": "^3.3.5"
+  },
+  "bugs": {
+    "url": "https://github.com/cameraui/clients/issues"
+  },
+  "homepage": "https://github.com/cameraui/clients/tree/main/clients/browser#readme",
+  "keywords": [
+    "camera.ui",
+    "vue",
+    "browser",
+    "client"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cameraui/clients.git",
+    "directory": "clients/browser"
+  }
+}

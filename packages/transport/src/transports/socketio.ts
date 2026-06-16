@@ -1,0 +1,208 @@
+import { io, Manager } from 'socket.io-client';
+
+import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
+
+import type { Socket } from 'socket.io-client';
+import type { ConnectionTarget, TransportSpec, TransportStatus } from '../core/types.js';
+import type { Transport, TransportEvent, TransportEventHandler, Unsubscribe } from './contract.js';
+
+export type { Socket };
+
+const SOCKETIO_SPEC: TransportSpec = {
+  id: 'socketio',
+  kind: 'persistent',
+  phaseGating: true,
+  graceMs: 4_000,
+};
+
+export interface SocketioTransportOptions {
+  readonly spec?: Partial<TransportSpec>;
+  readonly path?: string;
+  readonly mainNamespace?: string;
+  readonly reconnection?: boolean;
+  readonly reconnectionDelay?: number;
+  readonly reconnectionDelayMax?: number;
+  readonly timeout?: number;
+}
+
+export interface SocketioTransport extends Transport {
+  readonly manager: Manager | null;
+  socket(namespace?: string): Socket | null;
+  ensureSocket(namespace: string): Socket | null;
+}
+
+export function createSocketioTransport(options: SocketioTransportOptions = {}): SocketioTransport {
+  const spec: TransportSpec = { ...SOCKETIO_SPEC, ...options.spec };
+  const path = options.path ?? '/api/socket.io';
+  const mainNs = options.mainNamespace ?? '/camera.ui';
+  const reconnection = options.reconnection ?? true;
+  const reconnectionDelay = options.reconnectionDelay ?? 1_000;
+  const reconnectionDelayMax = options.reconnectionDelayMax ?? 5_000;
+  const timeout = options.timeout ?? 20_000;
+
+  const emitter = new TransportEmitter();
+  const sockets = new Map<string, Socket>();
+  let manager: Manager | null = null;
+  let currentTarget: ConnectionTarget | null = null;
+  let status: TransportStatus = { up: false };
+  let disposed = false;
+
+  function buildAuth(target: ConnectionTarget): Record<string, unknown> {
+    const auth: Record<string, unknown> = { token: `Bearer ${target.tokens.access}` };
+    if (target.tokens.proxySession) auth.session = target.tokens.proxySession;
+    return auth;
+  }
+
+  function buildQuery(target: ConnectionTarget): Record<string, string> {
+    const q: Record<string, string> = {};
+    if (target.tokens.proxySession) q.session = target.tokens.proxySession;
+    return q;
+  }
+
+  function markUp(): void {
+    if (status.up) return;
+    status = { up: true };
+    emitter.emit('up', undefined);
+  }
+
+  function markDown(reason: string): void {
+    if (!status.up && status.lastError === reason) return;
+    status = { up: false, lastError: reason };
+    emitter.emit('down', { reason });
+  }
+
+  function bindMainSocketEvents(socket: Socket): void {
+    socket.on('connect', () => markUp());
+    socket.on('disconnect', (reason: string) => markDown(reason));
+    socket.on('connect_error', (err: Error) => {
+      const msg = err?.message ?? 'connect_error';
+      if (msg.toLowerCase().includes('auth') || msg.toLowerCase().includes('unauthorized')) {
+        emitter.emit('auth-error', { message: msg });
+        return;
+      }
+      markDown(msg);
+    });
+  }
+
+  function openSocket(namespace: string, target: ConnectionTarget): Socket {
+    const url = `${target.endpoint.url}${namespace}`;
+    const sock = io(url, {
+      path,
+      auth: buildAuth(target),
+      query: buildQuery(target),
+      reconnection,
+      reconnectionDelay,
+      reconnectionDelayMax,
+      timeout,
+      rejectUnauthorized: false,
+      transports: ['websocket'],
+    });
+    sockets.set(namespace, sock);
+    return sock;
+  }
+
+  function rebuildManager(target: ConnectionTarget): void {
+    closeAllSockets();
+    manager = new Manager(target.endpoint.url, {
+      path,
+      autoConnect: false,
+      reconnection,
+      reconnectionDelay,
+      reconnectionDelayMax,
+      timeout,
+      rejectUnauthorized: false,
+      transports: ['websocket'],
+    });
+    const main = openSocket(mainNs, target);
+    bindMainSocketEvents(main);
+  }
+
+  function closeAllSockets(): void {
+    for (const sock of sockets.values()) {
+      sock.removeAllListeners();
+      sock.disconnect();
+    }
+    sockets.clear();
+    if (manager) {
+      manager._close();
+      manager = null;
+    }
+  }
+
+  function rebindAuth(target: ConnectionTarget): void {
+    // Update auth in place — `sock.auth` is a live property and is read at
+    // every (re)connect handshake. We deliberately do NOT force a disconnect:
+    // socket.io validates tokens only at handshake time, so a live session
+    // happily keeps running with an "expired" auth until the next natural
+    // reconnect, which then uses the fresh token. Mirrors NATS' setServers
+    // behaviour and avoids a visible drop on every proactive token refresh.
+    const auth = buildAuth(target);
+    for (const sock of sockets.values()) {
+      sock.auth = auth;
+    }
+  }
+
+  async function apply(target: ConnectionTarget | null): Promise<void> {
+    if (disposed) throw new Error('socketio-transport disposed');
+    if (isSameTarget(currentTarget, target)) return;
+
+    const endpointChanged = isEndpointChange(currentTarget, target);
+    currentTarget = target;
+
+    if (!target) {
+      closeAllSockets();
+      markDown('detached');
+      return;
+    }
+
+    if (endpointChanged || !manager) {
+      rebuildManager(target);
+      return;
+    }
+    rebindAuth(target);
+  }
+
+  function health(): TransportStatus {
+    return status;
+  }
+
+  function on<E extends TransportEvent>(event: E, handler: TransportEventHandler<E>): Unsubscribe {
+    return emitter.on(event, handler);
+  }
+
+  async function dispose(): Promise<void> {
+    disposed = true;
+    closeAllSockets();
+    currentTarget = null;
+    status = { up: false };
+    emitter.clear();
+  }
+
+  function socket(namespace = mainNs): Socket | null {
+    return sockets.get(namespace) ?? null;
+  }
+
+  function ensureSocket(namespace: string): Socket | null {
+    if (!currentTarget) return null;
+    let sock = sockets.get(namespace);
+    if (!sock) {
+      sock = openSocket(namespace, currentTarget);
+    }
+    return sock;
+  }
+
+  return {
+    get spec() {
+      return spec;
+    },
+    get manager() {
+      return manager;
+    },
+    apply,
+    health,
+    on,
+    dispose,
+    socket,
+    ensureSocket,
+  };
+}

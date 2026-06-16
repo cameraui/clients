@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "clients/**"
+      - "packages/**"
+      - "package.json"
+      - "package-lock.json"
+      - "eslint.config.*"
+      - ".prettierrc.json"
+      - ".github/workflows/ci.yml"
+  pull_request:
+    paths:
+      - "clients/**"
+      - "packages/**"
+      - "package.json"
+      - "package-lock.json"
+      - "eslint.config.*"
+      - ".prettierrc.json"
+      - ".github/workflows/ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Init submodules (camera.ui shallow via token)
+        run: |
+          git submodule update --init --depth 1 externals/rpc externals/sdk externals/nats.js
+          git config url."https://x-access-token:${{ secrets.CAMERA_UI_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git submodule update --init --depth 1 externals/camera.ui
+          git config --unset url."https://x-access-token:${{ secrets.CAMERA_UI_TOKEN }}@github.com/".insteadOf || true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - run: npm ci
+      - name: Build (externals → transport → browser)
+        run: npm run build
+      - run: npm run lint
+      - run: npm test
+
+  transport-only:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Init public submodules
+        run: git submodule update --init --depth 1 externals/rpc externals/sdk externals/nats.js
+      - uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+      - run: npm ci
+      - name: Build externals + transport
+        run: |
+          npm run build:externals
+          npm run build -w @camera.ui/transport
+      - run: npm run lint -w @camera.ui/transport
+      - run: npm run test -w @camera.ui/transport --if-present

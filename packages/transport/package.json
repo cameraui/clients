@@ -1,0 +1,93 @@
+{
+  "name": "@camera.ui/transport",
+  "version": "0.0.1",
+  "description": "camera.ui transport layer — framework-agnostic connection kernel, reducer state, pluggable transports (HTTP/WS/Socket.IO/NATS), lifecycle effects and worker bridge",
+  "author": "seydx (https://github.com/cameraui/clients)",
+  "type": "module",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./transports/http": {
+      "types": "./dist/transports/http.d.ts",
+      "import": "./dist/transports/http.js"
+    },
+    "./transports/socketio": {
+      "types": "./dist/transports/socketio.d.ts",
+      "import": "./dist/transports/socketio.js"
+    },
+    "./transports/nats": {
+      "types": "./dist/transports/nats.d.ts",
+      "import": "./dist/transports/nats.js"
+    },
+    "./transports/ws": {
+      "types": "./dist/transports/ws.d.ts",
+      "import": "./dist/transports/ws.js"
+    },
+    "./transports/nativeHttp": {
+      "types": "./dist/transports/nativeHttp.d.ts",
+      "import": "./dist/transports/nativeHttp.js"
+    },
+    "./worker": {
+      "types": "./dist/worker/index.d.ts",
+      "import": "./dist/worker.js"
+    },
+    "./testing": {
+      "types": "./dist/testing.d.ts",
+      "import": "./dist/testing.js"
+    }
+  },
+  "scripts": {
+    "build": "rimraf dist && vite build",
+    "type-check": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "format": "prettier --write 'src/' --ignore-unknown --no-error-on-unmatched-pattern",
+    "lint": "eslint .",
+    "lint:fix": "eslint --fix .",
+    "update": "updates --update ./",
+    "install-updates": "npm i --save",
+    "prepublishOnly": "npm i --package-lock-only && npm run lint:fix && npm run format && npm run build"
+  },
+  "dependencies": {
+    "@camera.ui/rpc": "file:../../externals/rpc/node",
+    "axios": "^1.17.0",
+    "socket.io-client": "^4.8.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.2",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@typescript-eslint/parser": "^8.61.0",
+    "eslint": "9.39.2",
+    "globals": "^17.6.0",
+    "jiti": "^2.7.0",
+    "prettier": "^3.8.4",
+    "rimraf": "^6.1.3",
+    "typescript": "5.9.3",
+    "typescript-eslint": "^8.61.0",
+    "unplugin-dts": "^1.0.2",
+    "updates": "^17.18.0",
+    "vite": "^8.0.16",
+    "vitest": "^4.1.8"
+  },
+  "bugs": {
+    "url": "https://github.com/cameraui/clients/issues"
+  },
+  "homepage": "https://github.com/cameraui/clients/tree/main/packages/transport#readme",
+  "keywords": [
+    "camera.ui",
+    "transport",
+    "connection"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cameraui/clients.git",
+    "directory": "packages/transport"
+  }
+}

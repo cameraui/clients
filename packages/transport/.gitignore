@@ -1,0 +1,7 @@
+/externals
+/credentials.json
+.env
+.env.local
+.env.*.local
+NOTES.md
+/demo

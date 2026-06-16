@@ -1,0 +1,12 @@
+[submodule "externals/sdk"]
+	path = externals/sdk
+	url = https://github.com/cameraui/sdk.git
+[submodule "externals/rpc"]
+	path = externals/rpc
+	url = https://github.com/cameraui/rpc.git
+[submodule "externals/nats.js"]
+	path = externals/nats.js
+	url = https://github.com/seydx/nats.js.git
+[submodule "externals/camera.ui"]
+	path = externals/camera.ui
+	url = https://github.com/seydx/camera.ui3.git
