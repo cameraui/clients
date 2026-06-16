@@ -9,8 +9,7 @@
     "clients/browser"
   ],
   "scripts": {
-    "build": "npm run build:externals && npm run build -w @camera.ui/transport && npm run build -w @camera.ui/browser",
-    "build:externals": "npm --prefix externals/rpc/node ci --ignore-scripts && npm --prefix externals/rpc/node run build && npm --prefix externals/sdk/node ci --ignore-scripts && npm --prefix externals/sdk/node run build && rimraf externals/rpc/node/node_modules externals/sdk/node/node_modules",
+    "build": "npm run build -w @camera.ui/transport && npm run build -w @camera.ui/browser",
     "lint": "npm run lint --workspaces --if-present",
     "lint:fix": "npm run lint:fix --workspaces --if-present",
     "release": "bash scripts/release.sh",
@@ -29,6 +28,7 @@
   "author": "seydx",
   "devDependencies": {
     "@types/node": "^25.9.3",
+    "@vue/language-core": "^3.3.5",
     "tsx": "^4.22.4",
     "typescript": "5.9.3",
     "updates": "^17.18.0"

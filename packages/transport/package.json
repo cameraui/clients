@@ -56,7 +56,7 @@
     "update": "updates --update ./"
   },
   "dependencies": {
-    "@camera.ui/rpc": "file:../../externals/rpc/node",
+    "@camera.ui/rpc": "^1.0.2",
     "axios": "^1.18.0",
     "socket.io-client": "^4.8.3"
   },

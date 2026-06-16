@@ -29,16 +29,15 @@
     "update": "updates --update ./"
   },
   "peerDependencies": {
+    "@camera.ui/rpc": "^1.0.2",
     "@camera.ui/sdk": "^0.0.5",
     "@camera.ui/transport": ">=0.0.1",
     "@vueuse/core": ">=14.3.0",
     "vue": ">=3.5.38"
   },
-  "dependencies": {
-    "@camera.ui/rpc": "file:../../externals/rpc/node"
-  },
   "devDependencies": {
-    "@camera.ui/sdk": "file:../../externals/sdk/node",
+    "@camera.ui/rpc": "^1.0.2",
+    "@camera.ui/sdk": "^0.0.5",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.3.1",
     "@microsoft/api-extractor": "^7.58.9",
