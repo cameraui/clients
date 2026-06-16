@@ -4,6 +4,7 @@
   "description": "camera.ui transport layer — framework-agnostic connection kernel, reducer state, pluggable transports (HTTP/WS/Socket.IO/NATS), lifecycle effects and worker bridge",
   "author": "seydx (https://github.com/cameraui/clients)",
   "type": "module",
+  "sideEffects": false,
   "files": [
     "dist"
   ],

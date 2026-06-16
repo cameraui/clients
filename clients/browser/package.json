@@ -4,6 +4,7 @@
   "description": "camera.ui browser client",
   "author": "seydx (https://github.com/cameraui/clients)",
   "type": "module",
+  "sideEffects": false,
   "files": [
     "dist"
   ],
