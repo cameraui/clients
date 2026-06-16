@@ -34,13 +34,21 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Init submodules (camera.ui shallow via token)
+        env:
+          CAMERA_UI_TOKEN: ${{ secrets.CAMERA_UI_TOKEN }}
         run: |
           git submodule update --init --depth 1 externals/rpc externals/sdk externals/nats.js
-          git config url."https://x-access-token:${{ secrets.CAMERA_UI_TOKEN }}@github.com/".insteadOf "https://github.com/"
+          git config --global url."https://x-access-token:${CAMERA_UI_TOKEN}@github.com/".insteadOf "https://github.com/"
+          if ! GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/seydx/camera.ui3.git HEAD >/dev/null 2>&1; then
+            echo "::error::Token cannot access seydx/camera.ui3"
+            exit 1
+          fi
           git submodule update --init --depth 1 externals/camera.ui
-          git config --unset url."https://x-access-token:${{ secrets.CAMERA_UI_TOKEN }}@github.com/".insteadOf || true
+          git config --global --unset url."https://x-access-token:${CAMERA_UI_TOKEN}@github.com/".insteadOf || true
 
       - uses: actions/setup-node@v6
         with:
