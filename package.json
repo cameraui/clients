@@ -15,7 +15,7 @@
     "lint:fix": "npm run lint:fix --workspaces --if-present",
     "release": "bash scripts/release.sh",
     "test": "npm run test --workspaces --if-present",
-    "update": "updates --update ./ && npm i --save && npm run update --workspaces --if-present && npm run install-updates --workspaces --if-present"
+    "update": "updates --update ./ && npm run update --workspaces --if-present && npm i --save --legacy-peer-deps"
   },
   "homepage": "https://github.com/cameraui/clients#readme",
   "bugs": {
@@ -28,16 +28,11 @@
   "license": "MIT",
   "author": "seydx",
   "devDependencies": {
-    "@stylistic/eslint-plugin": "^5.10.0",
     "@types/node": "^25.9.3",
-    "@typescript-eslint/parser": "^8.61.1",
-    "eslint": "9.39.2",
-    "globals": "^17.6.0",
-    "prettier": "^3.8.4",
-    "rimraf": "^6.1.3",
+    "@vue/language-core": "^3.3.5",
     "tsx": "^4.22.4",
     "typescript": "5.9.3",
-    "typescript-eslint": "^8.61.1",
+    "unplugin-dts": "^1.0.2",
     "updates": "^17.18.0"
   }
 }
