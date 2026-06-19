@@ -65,6 +65,9 @@
     "vue": "^3.5.38",
     "vue-tsc": "^3.3.5"
   },
+  "overrides": {
+    "@vue/language-core": "$@vue/language-core"
+  },
   "bugs": {
     "url": "https://github.com/cameraui/clients/issues"
   },
