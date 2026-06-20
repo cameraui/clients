@@ -9,12 +9,13 @@
     "clients/browser"
   ],
   "scripts": {
+    "audit": "npm audit fix && npm audit fix --workspaces",
     "build": "npm run build -w @camera.ui/transport && npm run build -w @camera.ui/browser",
+    "install-updates": "npm i --save",
     "lint": "npm run lint --workspaces --if-present",
     "lint:fix": "npm run lint:fix --workspaces --if-present",
     "release": "bash scripts/release.sh",
     "test": "npm run test --workspaces --if-present",
-    "install-updates": "npm i --save --legacy-peer-deps",
     "update": "updates --update ./ && npm run update --workspaces --if-present"
   },
   "homepage": "https://github.com/cameraui/clients#readme",
@@ -28,7 +29,7 @@
   "license": "MIT",
   "author": "seydx",
   "devDependencies": {
-    "@types/node": "^25.9.3",
+    "@types/node": "^26.0.0",
     "@vue/language-core": "^3.3.5",
     "tsx": "^4.22.4",
     "typescript": "5.9.3",
