@@ -29,14 +29,14 @@
     "update": "updates --update ./"
   },
   "peerDependencies": {
-    "@camera.ui/rpc": ">=1.0.3",
+    "@camera.ui/rpc": ">=1.0.4",
     "@camera.ui/sdk": ">=0.0.7",
     "@camera.ui/transport": ">=0.0.1",
     "@vueuse/core": ">=14.3.0",
     "vue": ">=3.5.38"
   },
   "devDependencies": {
-    "@camera.ui/rpc": "^1.0.3",
+    "@camera.ui/rpc": "^1.0.4",
     "@camera.ui/sdk": "~0.0.7",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.3.1",
