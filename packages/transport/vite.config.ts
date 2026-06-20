@@ -13,8 +13,8 @@ export default defineConfig({
   resolve: {
     alias: [
       { find: /^@nats-io\/transport-node$/, replacement: resolve(__dirname, '../../node_modules/@camera.ui/rpc/dist/wrapper.js') },
-      { find: /^@nats-io\/nats-core$/, replacement: resolve(__dirname, '../../externals/nats.js/core/src/mod.ts') },
-      { find: /^@nats-io\/nats-core\/internal$/, replacement: resolve(__dirname, '../../externals/nats.js/core/src/internal_mod.ts') },
+      { find: /^@nats-io\/nats-core$/, replacement: resolve(__dirname, '../../node_modules/@camera.ui/rpc/externals/nats.js/core/src/mod.ts') },
+      { find: /^@nats-io\/nats-core\/internal$/, replacement: resolve(__dirname, '../../node_modules/@camera.ui/rpc/externals/nats.js/core/src/internal_mod.ts') },
       { find: /^@nats-io\/nuid$/, replacement: resolve(__dirname, '../../node_modules/@nats-io/nuid') },
       { find: /^@nats-io\/nkeys$/, replacement: resolve(__dirname, '../../node_modules/@nats-io/nkeys') },
     ],
