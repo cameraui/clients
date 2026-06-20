@@ -15,7 +15,7 @@
     "release": "bash scripts/release.sh",
     "test": "npm run test --workspaces --if-present",
     "install-updates": "npm i --save --legacy-peer-deps",
-    "update": "updates --update ./ && npm run update --workspaces --if-present && npm i --save --legacy-peer-deps"
+    "update": "updates --update ./ && npm run update --workspaces --if-present"
   },
   "homepage": "https://github.com/cameraui/clients#readme",
   "bugs": {
