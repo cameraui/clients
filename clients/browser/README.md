@@ -7,4 +7,4 @@ The camera.ui browser client — Vue composables and reactive state for talking 
 
 ---
 
-*Part of the camera.ui ecosystem - A comprehensive camera management solution.*
+_Part of the camera.ui ecosystem - A comprehensive camera management solution._

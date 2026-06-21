@@ -6,4 +6,4 @@ The camera.ui Node client — the same RPC contract as `@camera.ui/browser`, for
 
 ---
 
-*Part of the camera.ui ecosystem - A comprehensive camera management solution.*
+_Part of the camera.ui ecosystem - A comprehensive camera management solution._

@@ -7,4 +7,4 @@ The camera.ui transport layer — a framework-agnostic connection kernel with pl
 
 ---
 
-*Part of the camera.ui ecosystem - A comprehensive camera management solution.*
+_Part of the camera.ui ecosystem - A comprehensive camera management solution._
