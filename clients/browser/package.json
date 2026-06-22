@@ -46,7 +46,7 @@
     "@typescript-eslint/parser": "^8.61.1",
     "@vitejs/plugin-vue": "^6.0.7",
     "@vue/eslint-config-prettier": "^10.2.0",
-    "@vue/eslint-config-typescript": "^14.8.0",
+    "@vue/eslint-config-typescript": "^14.9.0",
     "@vue/language-core": "^3.3.5",
     "@vue/tsconfig": "^0.9.1",
     "@vueuse/core": "^14.3.0",
