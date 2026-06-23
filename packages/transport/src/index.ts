@@ -7,6 +7,7 @@ export { attachNetworkChange } from './effects/networkChange.js';
 export { attachPersistence, localStorageAdapter, memoryStorageAdapter } from './effects/persistence.js';
 export { attachPresence, defaultOnNetworkOnline } from './effects/presence.js';
 export { attachProbeLoop, isProbeFailure, makeProbeFailure } from './effects/probeLoop.js';
+export { attachReconnectWatchdog } from './effects/reconnectWatchdog.js';
 export { attachTokenLifecycle } from './effects/tokenLifecycle.js';
 export { attachTransportSync } from './effects/transportSync.js';
 export { attachTransportWatchdog } from './effects/transportWatchdog.js';
@@ -36,6 +37,7 @@ export type { NetworkChangeOptions, NetworkChangeSource } from './effects/networ
 export type { PersistedTarget, Persistence, PersistenceOptions, StorageAdapter } from './effects/persistence.js';
 export type { PresenceCallback, PresenceOptions, VisibilitySource } from './effects/presence.js';
 export type { ProbeContext, ProbeFailure, ProbeFailureKind, ProbeLoopOptions } from './effects/probeLoop.js';
+export type { ReconnectWatchdogOptions } from './effects/reconnectWatchdog.js';
 export type { Detach, RefreshReason, TokenLifecycle, TokenLifecycleOptions } from './effects/tokenLifecycle.js';
 export type { TransportSyncOptions } from './effects/transportSync.js';
 export type { TransportWatchdogOptions, WatchdogClearReason } from './effects/transportWatchdog.js';
