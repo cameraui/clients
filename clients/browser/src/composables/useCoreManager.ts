@@ -15,5 +15,6 @@ export function useCoreManager(): ReactiveCoreManager {
     getFFmpegPath: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getFFmpegPath()),
     getServerAddresses: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getServerAddresses()),
     getPluginsByInterface: (interfaceName: PluginInterface) => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getPluginsByInterface(interfaceName)),
+    getCloudServerId: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getCloudServerId()),
   };
 }
