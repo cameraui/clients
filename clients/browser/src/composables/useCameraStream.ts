@@ -32,6 +32,11 @@ function acquireAutoStaggerDelay(): number {
   return delay;
 }
 
+function isElementVisible(el: HTMLElement | null | undefined): boolean {
+  if (!el || !el.isConnected) return false;
+  return el.checkVisibility?.() ?? el.offsetParent !== null;
+}
+
 export interface CameraStream {
   readonly status: Ref<StreamStatus>;
   readonly isPlaying: Ref<boolean>;
@@ -99,20 +104,12 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   const { activityConfig, autoStart: autoStartOption = true, isolated = false } = options;
   const shouldAutoStart = () => toValue(autoStartOption);
   const startDelay = options.startDelay ?? acquireAutoStaggerDelay();
-  const autoStartReady = ref(startDelay <= 0);
-  let startDelayTimer: ReturnType<typeof setTimeout> | undefined;
-
-  if (startDelay > 0) {
-    startDelayTimer = setTimeout(() => {
-      autoStartReady.value = true;
-    }, startDelay);
-  }
+  const cleanupFns: WatchStopHandle[] = [];
 
   const { isConnected } = useCameraUi();
 
   const cameraGetter = computed(() => toValue(options.camera));
   const isCameraString = computed(() => typeof cameraGetter.value === 'string');
-
   const cameraName = computed(() => {
     const cam = cameraGetter.value;
     return typeof cam === 'string' ? cam : cam.name.value;
@@ -127,17 +124,29 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     return cameraGetter.value as ReactiveCameraDevice;
   });
 
+  let startDelayTimer: ReturnType<typeof setTimeout> | undefined;
+  let ownedConnection: StreamConnection | undefined;
+
   const containerElement = shallowRef<HTMLElement | undefined>();
   const fullscreenElement = shallowRef<HTMLElement | undefined>();
   const videoElement = shallowRef<HTMLVideoElement | undefined>();
   const streamVideoElementRef = shallowRef<HTMLVideoElement | undefined>();
-
   const currentStream = shallowRef<ReactiveStream>();
+  const cameraDeviceRef = shallowRef<ReactiveCameraDevice | undefined>();
+
   const isUsingCachedStream = ref(false);
   const initialized = ref(false);
   const cleanedUp = ref(false);
+  const nativeWidth = ref(0);
+  const nativeHeight = ref(0);
+  const isPip = ref(false);
+  const autoStartReady = ref(startDelay <= 0);
 
-  const cameraDeviceRef = shallowRef<ReactiveCameraDevice | undefined>();
+  if (startDelay > 0) {
+    startDelayTimer = setTimeout(() => {
+      autoStartReady.value = true;
+    }, startDelay);
+  }
 
   watch(
     resolvedCameraDevice,
@@ -148,10 +157,34 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   );
 
   const isCameraDisabled = computed(() => cameraDeviceRef.value?.disabled.value === true);
+  const status = computed<StreamStatus>(() => currentStream.value?.status.value ?? 'idle');
+  const isPlaying = computed(() => currentStream.value?.isPlaying.value ?? false);
+  const activeMode = computed<'webrtc' | 'webrtc/tcp' | 'mse'>(() => currentStream.value?.activeMode.value ?? 'webrtc');
+  const activeResolution = computed<StreamingRole>(() => currentStream.value?.activeResolution.value ?? 'low-resolution');
+  const hasAudio = computed(() => currentStream.value?.hasAudio.value ?? false);
+  const hasBackchannel = computed(() => currentStream.value?.hasBackchannel.value ?? false);
+  const error = computed(() => currentStream.value?.error.value);
+  const isReconnecting = computed(() => status.value === 'reconnecting');
+  const isBusy = computed(() => cameraDeviceLoading.value || (!isPlaying.value && status.value !== 'error'));
+  const hasSound = computed(() => hasAudio.value && status.value === 'connected');
+  const hasIntercom = computed(() => Boolean(typeof navigator !== 'undefined' && navigator.mediaDevices) && hasBackchannel.value);
+  const muted = computed(() => currentStream.value?.muted.value ?? true);
+  const paused = computed(() => currentStream.value?.paused.value ?? false);
+  const supportsPip = computed(() => typeof document !== 'undefined' && document.pictureInPictureEnabled && !!videoElement.value);
+  const renderElement = computed<HTMLVideoElement | HTMLCanvasElement | undefined>(() => videoElement.value);
+  const fullscreenTarget = computed(() => fullscreenElement.value ?? containerElement.value);
 
-  const cleanupFns: WatchStopHandle[] = [];
+  const activityModeManager = createActivityMode({
+    initialMode: toValue(options.activityMode) ?? 'always-on',
+    config: activityConfig,
+    onStreamStart: () => {
+      if (!isCameraDisabled.value) currentStream.value?.start();
+    },
+    onStreamStop: () => currentStream.value?.stop(),
+    isStreamPlaying: () => isPlaying.value,
+  });
 
-  let ownedConnection: StreamConnection | undefined;
+  const { isFullscreen, toggle: toggleFullscreen } = useCuiFullscreen(fullscreenTarget);
 
   function createOwnedStream(): ReactiveStream {
     ownedConnection = createStreamConnection({
@@ -192,158 +225,20 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     }
   }
 
-  watch(
-    [containerElement, videoElement],
-    ([container, video]) => {
-      if (container && video) {
-        insertVideoIntoContainer(video, container);
-      }
-    },
-    { immediate: true },
-  );
+  function reclaimSharedVideo(): void {
+    if (isolated) return;
+    const container = containerElement.value;
+    const video = videoElement.value;
+    if (!container || !video || video.parentElement === container) return;
+    if (!isElementVisible(container) || isElementVisible(video.parentElement)) return;
 
-  const status = computed<StreamStatus>(() => currentStream.value?.status.value ?? 'idle');
-  const isPlaying = computed(() => currentStream.value?.isPlaying.value ?? false);
-  const activeMode = computed<'webrtc' | 'webrtc/tcp' | 'mse'>(() => currentStream.value?.activeMode.value ?? 'webrtc');
-  const activeResolution = computed<StreamingRole>(() => currentStream.value?.activeResolution.value ?? 'low-resolution');
-  const hasAudio = computed(() => currentStream.value?.hasAudio.value ?? false);
-  const hasBackchannel = computed(() => currentStream.value?.hasBackchannel.value ?? false);
-  const error = computed(() => currentStream.value?.error.value);
-  const isReconnecting = computed(() => status.value === 'reconnecting');
-  const isBusy = computed(() => cameraDeviceLoading.value || (!isPlaying.value && status.value !== 'error'));
-  const hasSound = computed(() => hasAudio.value && status.value === 'connected');
-  const hasIntercom = computed(() => Boolean(typeof navigator !== 'undefined' && navigator.mediaDevices) && hasBackchannel.value);
+    insertVideoIntoContainer(video, container);
+    video.play().catch(() => {});
 
-  const muted = computed(() => currentStream.value?.muted.value ?? true);
-  const paused = computed(() => currentStream.value?.paused.value ?? false);
-
-  const nativeWidth = ref(0);
-  const nativeHeight = ref(0);
-
-  const stopDimensionSync = watch([() => currentStream.value?.nativeWidth.value, () => currentStream.value?.nativeHeight.value], ([w, h]) => {
-    if (w && w > 0) nativeWidth.value = w;
-    if (h && h > 0) nativeHeight.value = h;
-  });
-  cleanupFns.push(stopDimensionSync);
-
-  // Fires for canvases that get created inside the camera container — typically
-  // NVR playback canvases (browser's live stream is WebRTC/MSE-only, no canvas).
-  if (options.canvasStyle !== undefined || options.canvasClass !== undefined) {
-    let stopCanvasListener: (() => void) | undefined;
-
-    function applyCanvasStyles(canvas: HTMLCanvasElement): void {
-      const style = toValue(options.canvasStyle);
-      const cls = toValue(options.canvasClass);
-
-      if (style) {
-        if (typeof style === 'string') {
-          canvas.style.cssText += ';' + style;
-        } else if (Array.isArray(style)) {
-          for (const s of style) {
-            if (typeof s === 'string') {
-              canvas.style.cssText += ';' + s;
-            } else if (s) {
-              Object.assign(canvas.style, s);
-            }
-          }
-        } else {
-          Object.assign(canvas.style, style);
-        }
-      }
-
-      if (cls) {
-        if (typeof cls === 'string') {
-          canvas.className = cls;
-        } else if (Array.isArray(cls)) {
-          canvas.className = cls.filter(Boolean).join(' ');
-        } else {
-          for (const [name, active] of Object.entries(cls)) {
-            canvas.classList.toggle(name, !!active);
-          }
-        }
-      }
-    }
-
-    // Browser itself doesn't create canvases — they come from nvr's NVR
-    // playback worker when it spawns a render surface inside the camera
-    // container. We MutationObserve the container instead of subscribing to
-    // a canvasManager API; that keeps browser free of any worker/rendering
-    // imports and works regardless of which package created the canvas.
-    const stopContainerWatch = watch(
-      containerElement,
-      (container) => {
-        stopCanvasListener?.();
-        stopCanvasListener = undefined;
-        if (!container) return;
-
-        Array.from(container.querySelectorAll('canvas')).forEach((node) => {
-          applyCanvasStyles(node as HTMLCanvasElement);
-        });
-
-        const observer = new MutationObserver((records) => {
-          for (const r of records) {
-            Array.from(r.addedNodes).forEach((added) => {
-              if (added instanceof HTMLCanvasElement) {
-                applyCanvasStyles(added);
-              } else if (added instanceof HTMLElement) {
-                Array.from(added.querySelectorAll('canvas')).forEach((c) => applyCanvasStyles(c as HTMLCanvasElement));
-              }
-            });
-          }
-        });
-        observer.observe(container, { childList: true, subtree: true });
-        stopCanvasListener = () => observer.disconnect();
-      },
-      { immediate: true },
-    );
-
-    cleanupFns.push(() => {
-      stopContainerWatch();
-      stopCanvasListener?.();
-    });
+    const camName = cameraName.value;
+    const entry = camName ? streamManager.get(camName) : undefined;
+    if (entry) entry.containerElementRef = containerElement;
   }
-
-  if (options.videoStyle !== undefined || options.videoClass !== undefined) {
-    const stopVideoStyleWatch = watch(
-      [videoElement, () => toValue(options.videoStyle), () => toValue(options.videoClass)],
-      ([video, style, cls]) => {
-        if (!video) return;
-
-        if (style) {
-          if (typeof style === 'string') {
-            video.style.cssText += ';' + style;
-          } else if (Array.isArray(style)) {
-            for (const s of style) {
-              if (typeof s === 'string') {
-                video.style.cssText += ';' + s;
-              } else if (s) {
-                Object.assign(video.style, s);
-              }
-            }
-          } else {
-            Object.assign(video.style, style);
-          }
-        }
-
-        if (cls) {
-          if (typeof cls === 'string') {
-            video.className = cls;
-          } else if (Array.isArray(cls)) {
-            video.className = cls.filter(Boolean).join(' ');
-          } else {
-            for (const [name, active] of Object.entries(cls)) {
-              video.classList.toggle(name, active);
-            }
-          }
-        }
-      },
-      { immediate: true },
-    );
-    cleanupFns.push(stopVideoStyleWatch);
-  }
-
-  const isPip = ref(false);
-  const supportsPip = computed(() => typeof document !== 'undefined' && document.pictureInPictureEnabled && !!videoElement.value);
 
   function onEnterPip(): void {
     isPip.value = true;
@@ -351,44 +246,6 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   function onLeavePip(): void {
     isPip.value = false;
   }
-
-  const stopPipWatch = watch(
-    videoElement,
-    (video, oldVideo) => {
-      if (oldVideo) {
-        oldVideo.removeEventListener('enterpictureinpicture', onEnterPip);
-        oldVideo.removeEventListener('leavepictureinpicture', onLeavePip);
-      }
-      if (video) {
-        video.addEventListener('enterpictureinpicture', onEnterPip);
-        video.addEventListener('leavepictureinpicture', onLeavePip);
-      }
-    },
-    { immediate: true },
-  );
-  cleanupFns.push(stopPipWatch);
-
-  const fullscreenTarget = computed(() => fullscreenElement.value ?? containerElement.value);
-  const { isFullscreen, toggle: toggleFullscreen } = useCuiFullscreen(fullscreenTarget);
-
-  const activityModeManager = createActivityMode({
-    initialMode: toValue(options.activityMode) ?? 'always-on',
-    config: activityConfig,
-    onStreamStart: () => {
-      if (!isCameraDisabled.value) currentStream.value?.start();
-    },
-    onStreamStop: () => currentStream.value?.stop(),
-    isStreamPlaying: () => isPlaying.value,
-  });
-
-  watch(
-    () => toValue(options.activityMode),
-    (newMode) => {
-      if (newMode && newMode !== activityModeManager.mode.value) {
-        activityModeManager.setMode(newMode);
-      }
-    },
-  );
 
   function initializeIsolated(): void {
     if (initialized.value) return;
@@ -663,8 +520,6 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     }
   }
 
-  const renderElement = computed<HTMLVideoElement | HTMLCanvasElement | undefined>(() => videoElement.value);
-
   function captureScreenshot(): string | null {
     const video = videoElement.value;
     if (!video || video.videoWidth === 0) return null;
@@ -674,29 +529,6 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     tmp.getContext('2d')?.drawImage(video, 0, 0);
     return tmp.toDataURL('image/png');
   }
-
-  watch(
-    [containerElement, resolvedCameraDevice, isConnected, autoStartReady],
-    () => {
-      if (!initialized.value) {
-        initialize();
-      } else if (autoStartReady.value && shouldAutoStart() && !isPlaying.value && status.value === 'idle' && !isCameraDisabled.value) {
-        // startDelay elapsed after initialize — trigger the deferred auto-start
-        currentStream.value?.start();
-      }
-    },
-    { immediate: true },
-  );
-
-  watch(isCameraDisabled, (disabled, wasDisabled) => {
-    if (!initialized.value) return;
-
-    if (!wasDisabled && disabled) {
-      currentStream.value?.stop();
-    } else if (wasDisabled && !disabled && shouldAutoStart()) {
-      currentStream.value?.restart();
-    }
-  });
 
   function cleanup(): void {
     if (cleanedUp.value) return;
@@ -736,6 +568,200 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
 
     activityModeManager.dispose();
   }
+
+  function applyCanvasStyles(canvas: HTMLCanvasElement): void {
+    const style = toValue(options.canvasStyle);
+    const cls = toValue(options.canvasClass);
+
+    if (style) {
+      if (typeof style === 'string') {
+        canvas.style.cssText += ';' + style;
+      } else if (Array.isArray(style)) {
+        for (const s of style) {
+          if (typeof s === 'string') {
+            canvas.style.cssText += ';' + s;
+          } else if (s) {
+            Object.assign(canvas.style, s);
+          }
+        }
+      } else {
+        Object.assign(canvas.style, style);
+      }
+    }
+
+    if (cls) {
+      if (typeof cls === 'string') {
+        canvas.className = cls;
+      } else if (Array.isArray(cls)) {
+        canvas.className = cls.filter(Boolean).join(' ');
+      } else {
+        for (const [name, active] of Object.entries(cls)) {
+          canvas.classList.toggle(name, !!active);
+        }
+      }
+    }
+  }
+
+  if (!isolated && typeof IntersectionObserver !== 'undefined') {
+    let visibilityObserver: IntersectionObserver | undefined;
+    const stopVisibilityWatch = watch(
+      containerElement,
+      (container) => {
+        visibilityObserver?.disconnect();
+        visibilityObserver = undefined;
+        if (!container) return;
+        visibilityObserver = new IntersectionObserver((entries) => {
+          if (entries.some((e) => e.isIntersecting)) reclaimSharedVideo();
+        });
+        visibilityObserver.observe(container);
+      },
+      { immediate: true },
+    );
+    cleanupFns.push(() => {
+      stopVisibilityWatch();
+      visibilityObserver?.disconnect();
+    });
+  }
+
+  if (options.canvasStyle !== undefined || options.canvasClass !== undefined) {
+    let stopCanvasListener: (() => void) | undefined;
+
+    const stopContainerWatch = watch(
+      containerElement,
+      (container) => {
+        stopCanvasListener?.();
+        stopCanvasListener = undefined;
+        if (!container) return;
+
+        Array.from(container.querySelectorAll('canvas')).forEach((node) => {
+          applyCanvasStyles(node as HTMLCanvasElement);
+        });
+
+        const observer = new MutationObserver((records) => {
+          for (const r of records) {
+            Array.from(r.addedNodes).forEach((added) => {
+              if (added instanceof HTMLCanvasElement) {
+                applyCanvasStyles(added);
+              } else if (added instanceof HTMLElement) {
+                Array.from(added.querySelectorAll('canvas')).forEach((c) => applyCanvasStyles(c as HTMLCanvasElement));
+              }
+            });
+          }
+        });
+        observer.observe(container, { childList: true, subtree: true });
+        stopCanvasListener = () => observer.disconnect();
+      },
+      { immediate: true },
+    );
+
+    cleanupFns.push(() => {
+      stopContainerWatch();
+      stopCanvasListener?.();
+    });
+  }
+
+  if (options.videoStyle !== undefined || options.videoClass !== undefined) {
+    const stopVideoStyleWatch = watch(
+      [videoElement, () => toValue(options.videoStyle), () => toValue(options.videoClass)],
+      ([video, style, cls]) => {
+        if (!video) return;
+
+        if (style) {
+          if (typeof style === 'string') {
+            video.style.cssText += ';' + style;
+          } else if (Array.isArray(style)) {
+            for (const s of style) {
+              if (typeof s === 'string') {
+                video.style.cssText += ';' + s;
+              } else if (s) {
+                Object.assign(video.style, s);
+              }
+            }
+          } else {
+            Object.assign(video.style, style);
+          }
+        }
+
+        if (cls) {
+          if (typeof cls === 'string') {
+            video.className = cls;
+          } else if (Array.isArray(cls)) {
+            video.className = cls.filter(Boolean).join(' ');
+          } else {
+            for (const [name, active] of Object.entries(cls)) {
+              video.classList.toggle(name, active);
+            }
+          }
+        }
+      },
+      { immediate: true },
+    );
+    cleanupFns.push(stopVideoStyleWatch);
+  }
+
+  const stopDimensionSync = watch([() => currentStream.value?.nativeWidth.value, () => currentStream.value?.nativeHeight.value], ([w, h]) => {
+    if (w && w > 0) nativeWidth.value = w;
+    if (h && h > 0) nativeHeight.value = h;
+  });
+  cleanupFns.push(stopDimensionSync);
+
+  const stopPipWatch = watch(
+    videoElement,
+    (video, oldVideo) => {
+      if (oldVideo) {
+        oldVideo.removeEventListener('enterpictureinpicture', onEnterPip);
+        oldVideo.removeEventListener('leavepictureinpicture', onLeavePip);
+      }
+      if (video) {
+        video.addEventListener('enterpictureinpicture', onEnterPip);
+        video.addEventListener('leavepictureinpicture', onLeavePip);
+      }
+    },
+    { immediate: true },
+  );
+  cleanupFns.push(stopPipWatch);
+
+  watch(
+    [containerElement, videoElement],
+    ([container, video]) => {
+      if (container && video) {
+        insertVideoIntoContainer(video, container);
+      }
+    },
+    { immediate: true },
+  );
+
+  watch(
+    () => toValue(options.activityMode),
+    (newMode) => {
+      if (newMode && newMode !== activityModeManager.mode.value) {
+        activityModeManager.setMode(newMode);
+      }
+    },
+  );
+
+  watch(
+    [containerElement, resolvedCameraDevice, isConnected, autoStartReady],
+    () => {
+      if (!initialized.value) {
+        initialize();
+      } else if (autoStartReady.value && shouldAutoStart() && !isPlaying.value && status.value === 'idle' && !isCameraDisabled.value) {
+        // startDelay elapsed after initialize — trigger the deferred auto-start
+        currentStream.value?.start();
+      }
+    },
+    { immediate: true },
+  );
+
+  watch(isCameraDisabled, (disabled, wasDisabled) => {
+    if (!initialized.value) return;
+
+    if (!wasDisabled && disabled) {
+      currentStream.value?.stop();
+    } else if (wasDisabled && !disabled && shouldAutoStart()) {
+      currentStream.value?.restart();
+    }
+  });
 
   onBeforeUnmount(cleanup);
 

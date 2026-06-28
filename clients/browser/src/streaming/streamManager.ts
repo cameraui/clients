@@ -110,23 +110,20 @@ class StreamManager {
 
     entry.refCount--;
 
-    // If another consumer remains and we were the active host, reparent the
-    // shared <video> to a remaining consumer's container so it doesn't end up
-    // orphaned in a detached DOM subtree (happens when CuiCameraViewDnD's
-    // fullscreen overlay unmounts and only the grid card consumer remains).
     if (consumerContainerRef) {
       entry.consumerContainerRefs.delete(consumerContainerRef);
 
-      if (entry.refCount > 0 && consumerContainerRef.value === entry.containerElementRef.value) {
-        for (const ref of entry.consumerContainerRefs) {
-          const candidate = ref.value;
-          if (candidate && candidate !== consumerContainerRef.value) {
-            entry.containerElementRef = ref;
-            if (entry.sharedVideoElement && entry.sharedVideoElement.parentElement !== candidate) {
-              candidate.appendChild(entry.sharedVideoElement);
-              entry.sharedVideoElement.play().catch(() => {});
-            }
-            break;
+      const video = entry.sharedVideoElement;
+      const releasingContainer = consumerContainerRef.value;
+      const videoParent = video?.parentElement ?? null;
+
+      if (entry.refCount > 0 && video && (videoParent === releasingContainer || videoParent === null || !videoParent.isConnected)) {
+        const target = this.pickVisibleConsumer(entry, releasingContainer);
+        if (target) {
+          entry.containerElementRef = target.ref;
+          if (video.parentElement !== target.el) {
+            target.el.appendChild(video);
+            video.play().catch(() => {});
           }
         }
       }
@@ -165,6 +162,21 @@ class StreamManager {
       mode: entry.stream.activeMode.value,
       resolution: entry.stream.activeResolution.value,
     }));
+  }
+
+  private pickVisibleConsumer(
+    entry: CachedStreamEntry,
+    excludeContainer: HTMLElement | undefined,
+  ): { ref: ShallowRef<HTMLElement | undefined>; el: HTMLElement } | undefined {
+    let fallback: { ref: ShallowRef<HTMLElement | undefined>; el: HTMLElement } | undefined;
+    for (const ref of entry.consumerContainerRefs) {
+      const el = ref.value;
+      if (!el || el === excludeContainer || !el.isConnected) continue;
+      const visible = el.checkVisibility?.() ?? el.offsetParent !== null;
+      if (visible) return { ref, el };
+      fallback ??= { ref, el };
+    }
+    return fallback;
   }
 
   private cancelRelease(cameraName: string): void {
