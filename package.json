@@ -11,9 +11,9 @@
   "scripts": {
     "audit": "npm audit fix && npm audit fix --workspaces",
     "build": "npm run build -w @camera.ui/transport && npm run build -w @camera.ui/browser",
+    "format": "npm run format --workspaces --if-present",
     "install-updates": "npm i --save",
     "lint": "npm run lint --workspaces --if-present",
-    "lint:fix": "npm run lint:fix --workspaces --if-present",
     "release": "bash scripts/release.sh",
     "test": "npm run test --workspaces --if-present",
     "update": "updates --update ./ && npm run update --workspaces --if-present"

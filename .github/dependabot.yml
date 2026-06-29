@@ -9,6 +9,6 @@ updates:
     schedule:
       interval: daily
     ignore:
-      - dependency-name: "@camera.ui/rpc"
       - dependency-name: "@camera.ui/transport"
-      - dependency-name: "@camera.ui/sdk"
+      - dependency-name: "eslint"
+      - dependency-name: "typescript"
