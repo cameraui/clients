@@ -65,7 +65,7 @@
     "@stylistic/eslint-plugin": "^5.10.0",
     "@typescript-eslint/parser": "^8.62.0",
     "@vue/language-core": "^3.3.5",
-    "eslint": "9.39.2",
+    "eslint": "10.6.0",
     "globals": "^17.7.0",
     "jiti": "^2.7.0",
     "prettier": "^3.9.1",
