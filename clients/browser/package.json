@@ -29,14 +29,14 @@
   },
   "peerDependencies": {
     "@camera.ui/rpc": ">=1.0.4",
-    "@camera.ui/sdk": ">=0.0.10",
+    "@camera.ui/sdk": ">=0.0.11",
     "@camera.ui/transport": ">=0.0.1",
     "@vueuse/core": ">=14.3.0",
     "vue": ">=3.5.39"
   },
   "devDependencies": {
     "@camera.ui/rpc": "^1.0.4",
-    "@camera.ui/sdk": "~0.0.10",
+    "@camera.ui/sdk": "~0.0.11",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.3.1",
     "@microsoft/api-extractor": "^7.58.9",
