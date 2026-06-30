@@ -1,6 +1,10 @@
+import { Logger } from '@camera.ui/logger';
+
 import { reducer } from './reducer.js';
 
 import type { Action, ConnectionPhase, ReducerContext } from './types.js';
+
+const log = new Logger('kernel');
 
 export type Listener = (phase: ConnectionPhase, prev: ConnectionPhase, action: Action) => void;
 export type Unsubscribe = () => void;
@@ -45,7 +49,7 @@ export function createKernel(options: KernelOptions): Kernel {
             try {
               listener(after, prev, next);
             } catch (err) {
-              console.warn('[kernel] listener threw on', next.type, err);
+              log.warn('listener threw on', next.type, err);
             }
           }
         }

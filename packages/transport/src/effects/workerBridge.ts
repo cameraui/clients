@@ -1,6 +1,10 @@
+import { Logger } from '@camera.ui/logger';
+
 import type { Kernel } from '../core/kernel.js';
 import type { ConnectionPhase } from '../core/types.js';
 import type { KernelSyncMessage, WorkerHost, WorkerMessage } from '../worker/protocol.js';
+
+const log = new Logger('workerBridge');
 
 export type Detach = () => void;
 
@@ -39,7 +43,7 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
         count++;
         maybeAttachHostListener(host);
       } catch (err) {
-        console.warn('[workerBridge] broadcast postMessage failed', { gen: msg.generation, phase: phase.kind, err });
+        log.warn('broadcast postMessage failed', { gen: msg.generation, phase: phase.kind, err });
       }
     }
     options.onBroadcast?.(generation, count);
@@ -53,7 +57,7 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
       maybeAttachHostListener(host);
       options.onSyncHost?.(generation);
     } catch (err) {
-      console.warn('[workerBridge] syncOne postMessage failed', { gen: msg.generation, err });
+      log.warn('syncOne postMessage failed', { gen: msg.generation, err });
     }
   }
 
@@ -97,7 +101,7 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
           host.postMessage({ type: 'kernel-revalidate' });
           maybeAttachHostListener(host);
         } catch (err) {
-          console.warn('[workerBridge] revalidate postMessage failed', err);
+          log.warn('revalidate postMessage failed', err);
         }
       }
     },

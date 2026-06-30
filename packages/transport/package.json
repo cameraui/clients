@@ -55,6 +55,7 @@
     "update": "updates --update ./"
   },
   "dependencies": {
+    "@camera.ui/logger": ">=0.0.1",
     "@camera.ui/rpc": ">=1.0.4",
     "axios": ">=1.18.1",
     "socket.io-client": ">=4.8.3"
