@@ -1,6 +1,6 @@
 {
   "name": "@camera.ui/logger",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "description": "camera.ui logging utility",
   "author": "seydx (https://github.com/cameraui/clients)",
   "type": "module",
