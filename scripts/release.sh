@@ -9,12 +9,13 @@ YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-PACKAGES="browser transport"
+PACKAGES="browser transport logger"
 
 resolve_pkg() {
   case "$1" in
     browser)   DIR="clients/browser";    NAME="@camera.ui/browser" ;;
     transport) DIR="packages/transport"; NAME="@camera.ui/transport" ;;
+    logger)    DIR="packages/logger";    NAME="@camera.ui/logger" ;;
     *) return 1 ;;
   esac
 }
