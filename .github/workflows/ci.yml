@@ -54,7 +54,7 @@ jobs:
           node-version: "22"
 
       - run: npm ci
-      - name: Build (externals → transport → browser)
+      - name: Build (externals → logger → transport → browser)
         run: npm run build
       - run: npm run lint
       - run: npm test
@@ -68,9 +68,10 @@ jobs:
         with:
           node-version: "22"
       - run: npm ci
-      - name: Build externals + transport
+      - name: Build externals + logger + transport
         run: |
           npm run build:externals
+          npm run build -w @camera.ui/logger
           npm run build -w @camera.ui/transport
       - run: npm run lint -w @camera.ui/transport
       - run: npm run test -w @camera.ui/transport --if-present

@@ -33,6 +33,7 @@ jobs:
           case "$PKG" in
             browser)   DIR="clients/browser";    NAME="@camera.ui/browser" ;;
             transport) DIR="packages/transport"; NAME="@camera.ui/transport" ;;
+            logger)    DIR="packages/logger";    NAME="@camera.ui/logger" ;;
             *) echo "::error::Unknown package '$PKG' in tag '$TAG'"; exit 1 ;;
           esac
           echo "pkg=$PKG"        >> "$GITHUB_OUTPUT"
@@ -70,7 +71,7 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Build (externals → transport → browser)
+      - name: Build (externals → logger → transport → browser)
         run: npm run build
 
       - name: Test
