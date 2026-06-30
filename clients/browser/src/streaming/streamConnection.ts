@@ -1,4 +1,5 @@
 /* eslint-disable @stylistic/max-len */
+import { Logger } from '@camera.ui/logger';
 import { useTimeoutFn, whenever } from '@vueuse/core';
 import { computed, ref, shallowRef, toValue, watch } from 'vue';
 
@@ -28,17 +29,7 @@ export interface StreamConnectionOptions {
   autoStart?: boolean;
 }
 
-const USE_DEBUG = true;
-
-function log(...args: unknown[]): void {
-  if (!USE_DEBUG) return;
-  const d = new Date();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
-  const ms = String(d.getMilliseconds()).padStart(3, '0');
-  console.log(`[StreamConnection ${hh}:${mm}:${ss}.${ms}]`, ...args);
-}
+const log = new Logger('StreamConnection');
 
 export class StreamConnection implements ReactiveStream {
   public readonly status: Ref<StreamStatus>;
@@ -187,22 +178,22 @@ export class StreamConnection implements ReactiveStream {
     this.setupWatchers();
 
     this.offTabPaused = onTabPaused(() => {
-      log(`onTabPaused fired — status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`);
+      log.debug(`onTabPaused fired — status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`);
       if (this.status.value === 'idle' || this.status.value === 'closed') {
-        log(`onTabPaused — already in ${this.status.value}, skipping stop()`);
+        log.debug(`onTabPaused — already in ${this.status.value}, skipping stop()`);
         return;
       }
       this.wasPausedByVisibility = true;
       this.stop();
-      log('onTabPaused — stop() done, wasPausedByVisibility=true');
+      log.debug('onTabPaused — stop() done, wasPausedByVisibility=true');
     });
 
     this.offTabVisible = onTabVisible(() => {
-      log(
+      log.debug(
         `onTabVisible fired — wasPausedByVisibility=${this.wasPausedByVisibility}, status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`,
       );
       if (!this.wasPausedByVisibility) {
-        log('onTabVisible — not paused by visibility, no-op');
+        log.debug('onTabVisible — not paused by visibility, no-op');
         return;
       }
       this.wasPausedByVisibility = false;
@@ -223,13 +214,13 @@ export class StreamConnection implements ReactiveStream {
   }
 
   public async start(): Promise<void> {
-    log(`start() called — status=${this.status.value}, isReady=${this.isReady.value}`);
+    log.debug(`start() called — status=${this.status.value}, isReady=${this.isReady.value}`);
     if (this.status.value !== 'idle' && this.status.value !== 'closed') {
-      log(`start() — skipped, status is ${this.status.value}`);
+      log.debug(`start() — skipped, status is ${this.status.value}`);
       return;
     }
     if (!this.isReady.value) {
-      log('start() — skipped, isReady=false');
+      log.debug('start() — skipped, isReady=false');
       return;
     }
 
@@ -243,7 +234,7 @@ export class StreamConnection implements ReactiveStream {
 
     try {
       if (!this.initializeSource()) {
-        log('start() — no streaming source available');
+        log.debug('start() — no streaming source available');
         this.error.value = new Error('No streaming source available');
         this.status.value = 'error';
         return;
@@ -253,7 +244,7 @@ export class StreamConnection implements ReactiveStream {
 
       // Stale check: restart()/stop() have started a new generation
       if (gen !== this.connectionGeneration) {
-        log('start() — generation stale after probe, aborting');
+        log.debug('start() — generation stale after probe, aborting');
         return;
       }
 
@@ -261,11 +252,11 @@ export class StreamConnection implements ReactiveStream {
       // (setResolution updates the refs but no longer restarts during 'connecting')
       this.initializeSource();
 
-      log('start() — connecting WebSocket');
+      log.debug('start() — connecting WebSocket');
       this.connectWebSocket();
     } catch (err) {
       if (gen !== this.connectionGeneration) return;
-      log('start() — error:', err);
+      log.debug('start() — error:', err);
       this.error.value = err instanceof Error ? err : new Error(String(err));
       this.status.value = 'error';
     }
@@ -273,10 +264,10 @@ export class StreamConnection implements ReactiveStream {
 
   public stop(): void {
     if (this.status.value === 'closed') {
-      log('stop() — already closed, no-op');
+      log.debug('stop() — already closed, no-op');
       return;
     }
-    log(`stop() — was ${this.status.value}, transitioning to closed`);
+    log.debug(`stop() — was ${this.status.value}, transitioning to closed`);
     ++this.connectionGeneration;
     this.status.value = 'closed';
     this.cleanup();
@@ -416,14 +407,14 @@ export class StreamConnection implements ReactiveStream {
 
   private startWhenReady(): void {
     if (this.isReady.value) {
-      log('startWhenReady — already ready, calling start() now');
+      log.debug('startWhenReady — already ready, calling start() now');
       this.start();
       return;
     }
-    log(`startWhenReady — not ready (camera=${!!this.camera.value}, video=${!!this.videoElement.value}, target=${!!this.target.value}), watching isReady`);
+    log.debug(`startWhenReady — not ready (camera=${!!this.camera.value}, video=${!!this.videoElement.value}, target=${!!this.target.value}), watching isReady`);
     const stop = watch(this.isReady, (ready) => {
       if (!ready) return;
-      log('startWhenReady — isReady → true, calling start()');
+      log.debug('startWhenReady — isReady → true, calling start()');
       stop();
       this.start();
     });

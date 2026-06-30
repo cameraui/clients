@@ -23,7 +23,7 @@ export default defineConfig({
       fileName: 'index',
     },
     rollupOptions: {
-      external: ['vue', '@vueuse/core', /^@camera\.ui\/transport/, /^@camera\.ui\/rpc/, /^@camera\.ui\/sdk/],
+      external: ['vue', '@vueuse/core', /^@camera\.ui\/logger/, /^@camera\.ui\/transport/, /^@camera\.ui\/rpc/, /^@camera\.ui\/sdk/],
       output: {
         globals: {
           vue: 'Vue',

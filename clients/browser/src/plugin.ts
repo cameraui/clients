@@ -1,3 +1,4 @@
+import { Logger } from '@camera.ui/logger';
 import { computed, markRaw, readonly, ref, shallowRef } from 'vue';
 
 import { refreshClientSubscriptions } from './composables/resetClientState.js';
@@ -10,6 +11,8 @@ import type { InjectionKey, Ref } from 'vue';
 import type { CameraUiContext, CameraUiEventCallback, CameraUiEventType } from './types.js';
 
 export const CAMERA_UI_INJECTION_KEY: InjectionKey<CameraUiContext> = Symbol('camera-ui');
+
+const log = new Logger('plugin');
 
 export interface CameraUiPluginInput {
   natsTransport: NatsTransport;
@@ -60,7 +63,7 @@ function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
       try {
         cb();
       } catch (err) {
-        console.warn('[camera.ui] context listener threw:', err);
+        log.warn('context listener threw:', err);
       }
     }
   }

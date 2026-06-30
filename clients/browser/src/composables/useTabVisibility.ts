@@ -1,21 +1,12 @@
+import { Logger } from '@camera.ui/logger';
 import { tryOnScopeDispose } from '@vueuse/core';
 import { computed, ref } from 'vue';
 
 import type { ComputedRef } from 'vue';
 
-const USE_DEBUG = true;
-
 const DEFAULT_TAB_PAUSE_MS = 30_000;
 
-function log(...args: unknown[]): void {
-  if (!USE_DEBUG) return;
-  const d = new Date();
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
-  const ss = String(d.getSeconds()).padStart(2, '0');
-  const ms = String(d.getMilliseconds()).padStart(3, '0');
-  console.log(`[TabVisibility ${hh}:${mm}:${ss}.${ms}]`, ...args);
-}
+const log = new Logger('TabVisibility');
 
 type HiddenCallback = () => void;
 type VisibleCallback = (info: { hiddenMs: number }) => void;
@@ -42,20 +33,20 @@ const _visibleListeners = new Set<VisibleEntry>();
 let _initialized = false;
 
 function _firePausedEntry(entry: PausedEntry): void {
-  log(`paused listener fired (delay ${entry.delayMs}ms reached)`);
+  log.debug(`paused listener fired (delay ${entry.delayMs}ms reached)`);
   try {
     entry.cb();
   } catch (err) {
-    console.error('[TabVisibility] onTabPaused listener threw:', err);
+    log.error('onTabPaused listener threw:', err);
   }
 }
 
 function _schedulePausedEntry(entry: PausedEntry): void {
-  log(`paused listener scheduled in ${entry.delayMs}ms`);
+  log.debug(`paused listener scheduled in ${entry.delayMs}ms`);
   entry.timer = setTimeout(() => {
     entry.timer = null;
     if (_isVisible.value) {
-      log('paused listener skipped — tab visible before delay');
+      log.debug('paused listener skipped — tab visible before delay');
       return;
     }
     _firePausedEntry(entry);
@@ -81,12 +72,12 @@ function _init(): void {
     if (!visible && _isVisible.value) {
       _isVisible.value = false;
       _hiddenAt = Date.now();
-      log(`tab → hidden (hidden=${_hiddenListeners.size} paused=${_pausedListeners.size})`);
+      log.debug(`tab → hidden (hidden=${_hiddenListeners.size} paused=${_pausedListeners.size})`);
       for (const entry of _hiddenListeners) {
         try {
           entry.cb();
         } catch (err) {
-          console.error('[TabVisibility] onTabHidden listener threw:', err);
+          log.error('onTabHidden listener threw:', err);
         }
       }
       for (const entry of _pausedListeners) {
@@ -97,12 +88,12 @@ function _init(): void {
       const hiddenMs = _hiddenAt != null ? Date.now() - _hiddenAt : 0;
       _hiddenAt = null;
       _isVisible.value = true;
-      log(`tab → visible (hiddenMs=${hiddenMs}, visible-listeners=${_visibleListeners.size})`);
+      log.debug(`tab → visible (hiddenMs=${hiddenMs}, visible-listeners=${_visibleListeners.size})`);
       for (const { cb } of _visibleListeners) {
         try {
           cb({ hiddenMs });
         } catch (err) {
-          console.error('[TabVisibility] onTabVisible listener threw:', err);
+          log.error('onTabVisible listener threw:', err);
         }
       }
     }

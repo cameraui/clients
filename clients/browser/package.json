@@ -28,6 +28,7 @@
     "update": "updates --update ./"
   },
   "peerDependencies": {
+    "@camera.ui/logger": ">=0.0.1",
     "@camera.ui/rpc": ">=1.0.4",
     "@camera.ui/sdk": ">=0.0.11",
     "@camera.ui/transport": ">=0.0.1",
@@ -35,6 +36,7 @@
     "vue": ">=3.5.39"
   },
   "devDependencies": {
+    "@camera.ui/logger": "file:../../packages/logger",
     "@camera.ui/rpc": "^1.0.4",
     "@camera.ui/sdk": "~0.0.11",
     "@camera.ui/transport": "file:../../packages/transport",
