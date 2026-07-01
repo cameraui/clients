@@ -252,6 +252,13 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   }
 
   function health(): TransportStatus {
+    // A connection frozen while backgrounded keeps reporting up until its
+    // throttled heartbeat timer fires. The client's wall-clock staleness check
+    // surfaces the dead socket immediately, so callers acting on resume (the
+    // kernel's nats-recovery, phase gating) don't trust a zombie.
+    if (status.up && proxy?.isStale) {
+      return { up: false, lastError: 'staleConnection' };
+    }
     return status;
   }
 
