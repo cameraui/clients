@@ -29,7 +29,7 @@
   "license": "MIT",
   "author": "seydx",
   "devDependencies": {
-    "@types/node": "^26.0.1",
+    "@types/node": "^26.1.0",
     "@vue/language-core": "^3.3.6",
     "tsx": "^4.22.4",
     "typescript": "5.9.3",
