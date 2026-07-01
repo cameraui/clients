@@ -1,7 +1,7 @@
 import { isRecording } from './flag.js';
 import { nativeConsole } from './nativeConsole.js';
 import { pushEntry } from './store.js';
-import { safeStringify } from './stringify.js';
+import { formatMessage, safeStringify } from './stringify.js';
 
 import type { LogLevel } from './types.js';
 
@@ -23,7 +23,7 @@ export function installConsoleCapture(): void {
     const level = METHOD_LEVEL[method];
     const original = nativeConsole[method];
     (console as unknown as Record<string, (...args: unknown[]) => void>)[method] = (...args: unknown[]) => {
-      if (isRecording()) pushEntry({ t: Date.now(), level, scope: 'console', msg: args.map(safeStringify).join(' ') });
+      if (isRecording()) pushEntry({ t: Date.now(), level, scope: 'console', msg: formatMessage(args) });
       original(...args);
     };
   }

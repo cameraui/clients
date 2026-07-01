@@ -1,7 +1,7 @@
 import { clearScopeOverride, isDebug, isRecording, setDebug, setRecording, subscribeFlags } from './flag.js';
 import { nativeConsole } from './nativeConsole.js';
 import { clearEntries, getEntries, pushEntry, setCapacity, subscribeStore } from './store.js';
-import { safeStringify } from './stringify.js';
+import { formatMessage } from './stringify.js';
 import { timestamp } from './time.js';
 
 import type { LogEntry, LogLevel, Unsubscribe } from './types.js';
@@ -43,8 +43,10 @@ export class Logger {
 
   private emit(level: LogLevel, args: unknown[]): void {
     if (level === 'debug' && !isDebug(this.scope)) return;
-    nativeConsole[CONSOLE_METHOD[level]](`[${this.scope} ${timestamp()}]`, ...args);
-    if (isRecording()) pushEntry({ t: Date.now(), level, scope: this.scope, msg: args.map(safeStringify).join(' ') });
+    const prefix = `[${this.scope} ${timestamp()}]`;
+    if (typeof args[0] === 'string') nativeConsole[CONSOLE_METHOD[level]](`${prefix} ${args[0]}`, ...args.slice(1));
+    else nativeConsole[CONSOLE_METHOD[level]](prefix, ...args);
+    if (isRecording()) pushEntry({ t: Date.now(), level, scope: this.scope, msg: formatMessage(args) });
   }
 
   static setDebug(enabled: boolean, scope?: string): void {

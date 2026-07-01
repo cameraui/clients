@@ -26,3 +26,41 @@ export function safeStringify(value: unknown): string {
     }
   }
 }
+
+const FORMAT_SPEC = /%[sdifoOjc%]/g;
+const HAS_SPEC = /%[sdifoOjc]/;
+
+export function formatMessage(args: readonly unknown[]): string {
+  const first = args[0];
+  if (typeof first !== 'string' || !HAS_SPEC.test(first)) {
+    return args.map(safeStringify).join(' ');
+  }
+
+  const rest = args.slice(1);
+  let idx = 0;
+  const out = first.replace(FORMAT_SPEC, (spec) => {
+    if (spec === '%%') return '%';
+    if (idx >= rest.length) return spec;
+    const arg = rest[idx++];
+    switch (spec) {
+      case '%s':
+        return typeof arg === 'string' ? arg : safeStringify(arg);
+      case '%d':
+      case '%i': {
+        const n = typeof arg === 'number' ? arg : Number(arg);
+        return Number.isNaN(n) ? 'NaN' : String(Math.trunc(n));
+      }
+      case '%f': {
+        const n = typeof arg === 'number' ? arg : Number(arg);
+        return Number.isNaN(n) ? 'NaN' : String(n);
+      }
+      case '%c':
+        return '';
+      default:
+        return safeStringify(arg);
+    }
+  });
+
+  const leftover = rest.slice(idx).map(safeStringify).join(' ');
+  return leftover ? `${out} ${leftover}` : out;
+}
