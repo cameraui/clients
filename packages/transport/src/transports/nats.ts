@@ -37,6 +37,17 @@ export interface NatsTransport extends Transport {
   forceReconnect(): Promise<void>;
 }
 
+function newConnId(): string {
+  const c = globalThis.crypto;
+  if (c?.randomUUID) return c.randomUUID();
+  if (c?.getRandomValues) {
+    const bytes = new Uint8Array(16);
+    c.getRandomValues(bytes);
+    return Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+  }
+  return `${Date.now()}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+}
+
 export function createNatsTransport(options: NatsTransportOptions = {}): NatsTransport {
   const spec: TransportSpec = { ...NATS_SPEC, ...options.spec };
   const proxyPath = options.proxyPath ?? '/api/proxy';
@@ -58,6 +69,9 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   let status: TransportStatus = { up: false };
   let statusAbort: AbortController | null = null;
   let disposed = false;
+  // Stable for the lifetime of the current RPCClient (regenerated per rebuildClient).
+  // Kept in sync between the proxy URL (?connId=) and the client's reply subjects.
+  let connId: string | null = null;
 
   function buildServers(target: ConnectionTarget): string[] {
     const url = new URL(target.endpoint.url);
@@ -65,6 +79,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     const port = url.port || (url.protocol === 'https:' ? '443' : '80');
     const params = new URLSearchParams({ token: target.tokens.access });
     if (target.tokens.proxySession) params.set('session', target.tokens.proxySession);
+    if (connId) params.set('connId', connId);
     return [`${wsProtocol}//${url.hostname}:${port}${proxyPath}?${params.toString()}`];
   }
 
@@ -159,10 +174,14 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       notifyClient();
     }
 
+    // Fresh per-connection token BEFORE buildServers so the proxy URL and the
+    // client's reply subjects carry the same connId.
+    connId = newConnId();
     const servers = buildServers(target);
     const next = createRPCClient({
       servers,
       name: clientName,
+      connId,
       auth: { user: natsUser, password: natsPassword },
       reconnect: true,
       maxReconnectAttempts: -1,
