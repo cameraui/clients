@@ -497,13 +497,19 @@ export function createSensorManager(
     initialized.value = true;
   }
 
+  function launchInit(): Promise<void> {
+    const p = doInit().finally(() => {
+      if (initPromise === p) initPromise = undefined;
+    });
+    initPromise = p;
+    return p;
+  }
+
   async function ensureInitialized(): Promise<void> {
     if (initialized.value) return;
 
     if (!initPromise) {
-      initPromise = doInit().finally(() => {
-        initPromise = undefined;
-      });
+      launchInit();
     }
 
     return initPromise;
@@ -511,12 +517,21 @@ export function createSensorManager(
 
   async function reconnect(): Promise<void> {
     initialized.value = false;
-    if (!initPromise) {
-      initPromise = doInit().finally(() => {
-        initPromise = undefined;
-      });
+    if (initPromise) {
+      // An init is already in flight — its subscriptions may sit on the OLD
+      // (dead) client. Queue a fresh init behind it so the sensor
+      // subscriptions land on the current client.
+      const current = initPromise;
+      const p = current
+        .catch(() => {})
+        .then(() => doInit())
+        .finally(() => {
+          if (initPromise === p) initPromise = undefined;
+        });
+      initPromise = p;
+      return p;
     }
-    return initPromise;
+    return launchInit();
   }
 
   function close(): void {

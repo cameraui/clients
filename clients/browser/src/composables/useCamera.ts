@@ -3,7 +3,7 @@ import { computed, ref, shallowRef } from 'vue';
 
 import { NamespaceManager } from '../server/index.js';
 import { rpcCall } from './useRpc.js';
-import { getSnapshot, setSnapshot } from './useSnapshot.js';
+import { getSnapshot, setSnapshot, subscribeSnapshot } from './useSnapshot.js';
 
 import type { RPCClient } from '@camera.ui/rpc';
 import type { Camera, CameraInput, CameraSource, ProbeConfig, ProbeStream } from '@camera.ui/sdk';
@@ -43,9 +43,14 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
   const camera = shallowRef(initialCamera);
   const connected = ref(false);
   const frameWorkerConnected = ref(false);
-  const snapshot = computed(() => getSnapshot(initialCamera._id));
+  const snapshot = shallowRef<ArrayBuffer | undefined>(getSnapshot(initialCamera._id));
+
   const snapshotLoading = ref(false);
   const sensorStates = ref<Record<string, SensorRefreshedState>>({});
+
+  const unsubscribeSnapshot = subscribeSnapshot(initialCamera._id, () => {
+    snapshot.value = getSnapshot(initialCamera._id);
+  });
 
   const name = computed(() => camera.value.name);
   const room = computed(() => camera.value.room);
@@ -167,6 +172,8 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
 
     closeSensorSubscription?.();
     closeSensorSubscription = undefined;
+
+    unsubscribeSnapshot();
   }
 
   async function fetchSnapshotFn(sourceId?: string, forceNew?: boolean): Promise<ArrayBuffer | undefined> {

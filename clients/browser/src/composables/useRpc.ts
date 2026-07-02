@@ -169,6 +169,14 @@ export function useRpcSubscription(subscribeFn: (rpc: RPCClient) => Promise<() =
       }
     } finally {
       pending = false;
+      // A newer RPCClient may have arrived while this bind was in flight —
+      // the watch's bind() call was dropped by the pending guard. Without
+      // this rebind the subscription would stay dead until the NEXT
+      // reconnect.
+      const current = ctx.rpc.value;
+      if (!disposed && current && current !== rpc) {
+        void bind(current);
+      }
     }
   }
 
@@ -216,13 +224,15 @@ function defaultRetryDelayMs(attempt: number): number {
 
 function defaultShouldRetry(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
+  const code = (err as { code?: unknown }).code;
+  if (code === 'TIMEOUT' || code === 'CONNECTION_CLOSED') return true;
   const msg = err.message.toLowerCase();
   if (msg.includes('not connected')) return true;
   if (msg.includes('connection closed')) return true;
   if (msg.includes('no responders')) return true;
   if (msg.includes('connection refused')) return true;
   if (msg.includes('socket')) return true;
-  if (msg.includes('timeout')) return true;
+  if (msg.includes('timed out') || msg.includes('timeout')) return true;
   return false;
 }
 

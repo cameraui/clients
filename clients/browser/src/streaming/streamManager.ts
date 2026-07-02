@@ -37,6 +37,10 @@ class StreamManager {
     return this.streams.has(cameraName);
   }
 
+  public getRefCount(cameraName: string): number {
+    return this.streams.get(cameraName)?.refCount ?? 0;
+  }
+
   public get(cameraName: string): CachedStreamEntry | undefined {
     return this.streams.get(cameraName);
   }
@@ -150,7 +154,7 @@ class StreamManager {
     this.releaseTimers.clear();
 
     for (const [cameraName, entry] of this.streams) {
-      entry.stream.stop();
+      destroyStream(entry.stream);
       this.streams.delete(cameraName);
     }
   }
@@ -194,11 +198,20 @@ class StreamManager {
     }
 
     if (entry.refCount <= 0) {
-      entry.stream.stop();
+      destroyStream(entry.stream);
       this.streams.delete(cameraName);
     }
 
     this.releaseTimers.delete(cameraName);
+  }
+}
+
+function destroyStream(stream: ReactiveStream): void {
+  const s = stream as ReactiveStream & { destroy?: () => void };
+  if (typeof s.destroy === 'function') {
+    s.destroy();
+  } else {
+    s.stop();
   }
 }
 

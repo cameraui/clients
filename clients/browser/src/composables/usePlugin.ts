@@ -92,7 +92,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
       _isLoading.value = true;
       try {
         const result = await pending;
-        if (result) {
+        if (result && toValue(pluginName) === name) {
           const cachedAfterPending = acquirePlugin(name);
           if (cachedAfterPending) {
             currentPluginName = name;
@@ -135,6 +135,10 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
       const result = await loadPromise;
       if (result) {
         pluginCache.acquire(name, () => result);
+        if (toValue(pluginName) !== name) {
+          pluginCache.release(name);
+          return;
+        }
         currentPluginName = name;
         plugin.value = result.proxy;
         contract.value = result.contract;

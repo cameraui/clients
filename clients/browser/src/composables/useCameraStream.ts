@@ -115,7 +115,9 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     return typeof cam === 'string' ? cam : cam.name.value;
   });
 
-  const { camera: cameraDeviceFromLookup, isLoading: cameraDeviceLoading } = useCameraById(cameraName);
+  const lookupName = computed(() => (isCameraString.value ? cameraName.value : ''));
+  const { camera: cameraDeviceFromLookup, isLoading: lookupLoading } = useCameraById(lookupName);
+  const cameraDeviceLoading = computed(() => isCameraString.value && lookupLoading.value);
 
   const resolvedCameraDevice = computed<ReactiveCameraDevice | undefined>(() => {
     if (isCameraString.value) {
@@ -126,6 +128,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
 
   let startDelayTimer: ReturnType<typeof setTimeout> | undefined;
   let ownedConnection: StreamConnection | undefined;
+  let registeredCamName: string | undefined;
 
   const containerElement = shallowRef<HTMLElement | undefined>();
   const fullscreenElement = shallowRef<HTMLElement | undefined>();
@@ -180,7 +183,13 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     onStreamStart: () => {
       if (!isCameraDisabled.value) currentStream.value?.start();
     },
-    onStreamStop: () => currentStream.value?.stop(),
+    onStreamStop: () => {
+      if (isUsingCachedStream.value) {
+        const camName = registeredCamName ?? cameraName.value;
+        if (camName && streamManager.getRefCount(camName) > 1) return;
+      }
+      currentStream.value?.stop();
+    },
     isStreamPlaying: () => isPlaying.value,
   });
 
@@ -286,6 +295,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
 
     if (cached) {
       initialized.value = true;
+      registeredCamName = camName;
       isUsingCachedStream.value = true;
       currentStream.value = cached.stream;
 
@@ -317,7 +327,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
 
       setupCachedStreamWatchers(cached.stream, video, camName);
 
-      if (shouldAutoStart() && autoStartReady.value && !isCameraDisabled.value) {
+      if (shouldAutoStart() && autoStartReady.value && activityModeManager.mode.value === 'always-on' && !isCameraDisabled.value) {
         if (cached.stream.activeMode.value !== 'mse') {
           attachCachedStream(cached, video, camName);
         } else {
@@ -326,6 +336,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
       }
     } else if (camDevice) {
       initialized.value = true;
+      registeredCamName = camName;
       isUsingCachedStream.value = false;
       currentStream.value = ownedStream;
 
@@ -551,19 +562,24 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     cleanupFns.length = 0;
 
     if (isolated) {
-      ownedConnection?.stop();
+      ownedConnection?.destroy();
     } else {
-      const camName = cameraName.value;
+      const camName = registeredCamName;
       const video = videoElement.value;
 
       if (camName && initialized.value) {
         streamManager.release(camName, video, containerElement);
       }
 
-      // Don't destroy the ownedConnection here!
-      // The streamManager handles the stream lifecycle:
-      // - If other consumers exist (refCount > 0), stream continues
-      // - If no consumers (refCount <= 0), streamManager.doRelease() stops it after timer
+      // The manager owns the stream lifecycle only when OUR connection was
+      // registered (currentStream === ownedStream): other consumers keep it
+      // alive, and doRelease() destroys it once the refcount hits zero. When
+      // we rode a cached stream (or never initialized), the owned connection
+      // never entered the manager — destroy it here or its detached scope
+      // (watchers, visibility hooks) leaks for the page lifetime.
+      if (!initialized.value || currentStream.value !== ownedStream) {
+        ownedConnection?.destroy();
+      }
     }
 
     activityModeManager.dispose();
@@ -745,8 +761,17 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     () => {
       if (!initialized.value) {
         initialize();
-      } else if (autoStartReady.value && shouldAutoStart() && !isPlaying.value && status.value === 'idle' && !isCameraDisabled.value) {
-        // startDelay elapsed after initialize — trigger the deferred auto-start
+      } else if (
+        autoStartReady.value &&
+        shouldAutoStart() &&
+        activityModeManager.mode.value === 'always-on' &&
+        !isPlaying.value &&
+        status.value === 'idle' &&
+        !isCameraDisabled.value
+      ) {
+        // startDelay elapsed after initialize — trigger the deferred auto-start.
+        // Gated on always-on like the initialize paths: standby/activity
+        // consumers start via activity triggers, not the stagger timer.
         currentStream.value?.start();
       }
     },

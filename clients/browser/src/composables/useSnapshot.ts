@@ -1,6 +1,7 @@
 import { tryOnScopeDispose } from '@vueuse/core';
 import { computed, ref, shallowRef, toValue, watch } from 'vue';
 
+import { acquireCameraDevice, releaseCameraDevice } from './useCameraById.js';
 import { useCameraUi } from './useCameraUi.js';
 import { useDeviceManager } from './useDeviceManager.js';
 
@@ -43,6 +44,16 @@ export function setSnapshot(cameraId: string, data: ArrayBuffer): void {
 
 export function getSnapshot(cameraId: string): ArrayBuffer | undefined {
   return snapshotCache.get(cameraId);
+}
+
+export function subscribeSnapshot(cameraId: string, cb: () => void): () => void {
+  if (!subscribers.has(cameraId)) {
+    subscribers.set(cameraId, new Set());
+  }
+  subscribers.get(cameraId)!.add(cb);
+  return () => {
+    subscribers.get(cameraId)?.delete(cb);
+  };
 }
 
 export function getSnapshotUrl(cameraId: string): string | undefined {
@@ -106,13 +117,17 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
 
     _isLoading.value = true;
     try {
-      const device = await deviceManager.getCamera(id);
-      if (device) {
-        const result = await device.fetchSnapshot();
-        if (result) {
-          setSnapshot(id, result);
-          snapshot.value = result;
+      const device = await acquireCameraDevice(deviceManager, id);
+      try {
+        if (device) {
+          const result = await device.fetchSnapshot();
+          if (result) {
+            setSnapshot(id, result);
+            snapshot.value = result;
+          }
         }
+      } finally {
+        if (device) releaseCameraDevice(id);
       }
     } catch {
       // Camera may be offline / RPC timeout — silently ignore
@@ -137,13 +152,17 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
 
     _isLoading.value = true;
     try {
-      const device = await deviceManager.getCamera(id);
-      if (device) {
-        const result = await device.fetchSnapshot(undefined, true);
-        if (result) {
-          setSnapshot(id, result);
-          snapshot.value = result;
+      const device = await acquireCameraDevice(deviceManager, id);
+      try {
+        if (device) {
+          const result = await device.fetchSnapshot(undefined, true);
+          if (result) {
+            setSnapshot(id, result);
+            snapshot.value = result;
+          }
         }
+      } finally {
+        if (device) releaseCameraDevice(id);
       }
     } catch {
       // Camera may be offline / RPC timeout — silently ignore

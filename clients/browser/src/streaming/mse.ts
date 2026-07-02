@@ -24,6 +24,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
 
   let mediaSource: MediaSource | null = null;
   let sourceBuffer: SourceBuffer | null = null;
+  let objectUrl: string | null = null;
   let isReady = false;
   let hasFirstData = false;
 
@@ -62,8 +63,8 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
       videoElement.disableRemotePlayback = true;
       videoElement.srcObject = mediaSource;
     } else {
-      const newUrl = URL.createObjectURL(mediaSource);
-      videoElement.src = newUrl;
+      objectUrl = URL.createObjectURL(mediaSource);
+      videoElement.src = objectUrl;
       videoElement.srcObject = null;
     }
 
@@ -124,8 +125,13 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
         const data = pendingBuffer.slice(0, pendingLength);
         sourceBuffer.appendBuffer(data);
         pendingLength = 0;
-      } catch {
-        // Ignore errors
+      } catch (err) {
+        // A swallowed failure here would stall the pipeline permanently: no
+        // new update → no updateend → the queue never drains again and every
+        // incoming frame accumulates until overflow.
+        if (!recoverFromQuota(err)) {
+          onError(err instanceof Error ? err : new Error(String(err)));
+        }
       }
     }
 
@@ -178,14 +184,48 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
 
     if (sourceBuffer.updating || pendingLength > 0) {
       const bytes = new Uint8Array(data);
+      if (pendingLength + bytes.byteLength > pendingBuffer.byteLength) {
+        // Queue overflow — the SourceBuffer stopped draining. Uint8Array.set
+        // would throw an uncaught RangeError inside the WS dispatch; surface
+        // a proper error instead so the connection layer can recover.
+        pendingLength = 0;
+        onError(new Error('MSE pending buffer overflow'));
+        return;
+      }
       pendingBuffer.set(bytes, pendingLength);
       pendingLength += bytes.byteLength;
     } else {
       try {
         sourceBuffer.appendBuffer(data);
-      } catch {
-        // Ignore errors
+      } catch (err) {
+        if (recoverFromQuota(err)) {
+          // Queue the frame — the updateend fired by the eviction retries the
+          // drain with it.
+          const bytes = new Uint8Array(data);
+          if (bytes.byteLength <= pendingBuffer.byteLength) {
+            pendingBuffer.set(bytes, 0);
+            pendingLength = bytes.byteLength;
+          }
+        }
       }
+    }
+  }
+
+  // QuotaExceeded → evict the tail of the buffered range. remove() is async
+  // and fires updateend, which re-attempts the pending drain. Returns true if
+  // an eviction was started.
+  function recoverFromQuota(err: unknown): boolean {
+    if ((err as DOMException | undefined)?.name !== 'QuotaExceededError') return false;
+    if (!sourceBuffer || sourceBuffer.updating || !sourceBuffer.buffered?.length) return false;
+    try {
+      const start0 = sourceBuffer.buffered.start(0);
+      const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
+      const evictTo = Math.max(start0 + 1, end - STREAM_CONFIG.MSE.BUFFER_WINDOW);
+      if (evictTo <= start0) return false;
+      sourceBuffer.remove(start0, evictTo);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -211,6 +251,11 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
       }
     }
     mediaSource = null;
+
+    if (objectUrl) {
+      URL.revokeObjectURL(objectUrl);
+      objectUrl = null;
+    }
 
     isReady = false;
     hasFirstData = false;

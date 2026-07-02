@@ -1,7 +1,7 @@
 /* eslint-disable @stylistic/max-len */
 import { Logger } from '@camera.ui/logger';
 import { useTimeoutFn, whenever } from '@vueuse/core';
-import { computed, ref, shallowRef, toValue, watch } from 'vue';
+import { computed, effectScope, ref, shallowRef, toValue, watch } from 'vue';
 
 import { useCameraUi } from '../composables/useCameraUi.js';
 import { useTabVisibility } from '../composables/useTabVisibility.js';
@@ -53,6 +53,7 @@ export class StreamConnection implements ReactiveStream {
 
   private connectionGeneration = 0;
   private abortController = new AbortController();
+  private readonly scope = effectScope(true);
   private offTabVisible: (() => void) | undefined;
   private offTabPaused: (() => void) | undefined;
   private wasPausedByVisibility = false;
@@ -77,12 +78,14 @@ export class StreamConnection implements ReactiveStream {
   private readonly isReady: ComputedRef<boolean>;
   private readonly effectiveMode: ComputedRef<Exclude<VideoStreamingMode, 'auto'>>;
 
-  private readonly startWsConnectTimeout: () => void;
-  private readonly stopWsConnectTimeout: () => void;
-  private readonly startConnectTimeout: () => void;
-  private readonly stopConnectTimeout: () => void;
-  private readonly startReconnectTimeout: () => void;
-  private readonly stopReconnectTimeout: () => void;
+  private startWsConnectTimeout!: () => void;
+  private stopWsConnectTimeout!: () => void;
+  private startConnectTimeout!: () => void;
+  private stopConnectTimeout!: () => void;
+  private startMseConnectTimeout!: () => void;
+  private stopMseConnectTimeout!: () => void;
+  private startReconnectTimeout!: () => void;
+  private stopReconnectTimeout!: () => void;
 
   constructor(options: StreamConnectionOptions) {
     this.options = options;
@@ -124,93 +127,115 @@ export class StreamConnection implements ReactiveStream {
       return this.requestedMode.value;
     });
 
-    const { onTabPaused, onTabVisible } = useTabVisibility();
+    this.scope.run(() => {
+      const { onTabPaused, onTabVisible } = useTabVisibility();
 
-    const { start: startWsConnectTimeout, stop: stopWsConnectTimeout } = useTimeoutFn(
-      () => {
-        if (this.wsHandle?.readyState === WebSocket.CONNECTING) {
-          this.disconnectWebSocket();
-          if (!this.abortController.signal.aborted && this.status.value !== 'closed') {
-            this.restart();
-          }
-        }
-      },
-      STREAM_CONFIG.WEBRTC.WS_CONNECT_TIMEOUT,
-      { immediate: false },
-    );
-    this.startWsConnectTimeout = startWsConnectTimeout;
-    this.stopWsConnectTimeout = stopWsConnectTimeout;
-
-    const { start: startConnectTimeout, stop: stopConnectTimeout } = useTimeoutFn(
-      () => {
-        if (this.webrtcHandler && !this.webrtcHandler.isConnected) {
-          if (this.requestedMode.value === 'auto') {
-            if (this.mseHandler?.isReady) {
-              this.activeMode.value = 'mse';
-              this.status.value = 'connected';
-            } else {
-              this.activeMode.value = 'mse';
-              this.startMSE();
-            }
-          } else {
-            this.restart();
-          }
-        }
-      },
-      STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT,
-      { immediate: false },
-    );
-    this.startConnectTimeout = startConnectTimeout;
-    this.stopConnectTimeout = stopConnectTimeout;
-
-    const { start: startReconnectTimeout, stop: stopReconnectTimeout } = useTimeoutFn(
-      () => {
-        if (!this.abortController.signal.aborted) {
-          this.restart();
-        }
-      },
-      STREAM_CONFIG.WEBRTC.RECONNECT_DELAY,
-      { immediate: false },
-    );
-    this.startReconnectTimeout = startReconnectTimeout;
-    this.stopReconnectTimeout = stopReconnectTimeout;
-
-    this.setupWatchers();
-
-    this.offTabPaused = onTabPaused(() => {
-      log.debug(`onTabPaused fired — status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`);
-      if (this.status.value === 'idle' || this.status.value === 'closed') {
-        log.debug(`onTabPaused — already in ${this.status.value}, skipping stop()`);
-        return;
-      }
-      this.wasPausedByVisibility = true;
-      this.stop();
-      log.debug('onTabPaused — stop() done, wasPausedByVisibility=true');
-    });
-
-    this.offTabVisible = onTabVisible(() => {
-      log.debug(
-        `onTabVisible fired — wasPausedByVisibility=${this.wasPausedByVisibility}, status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`,
-      );
-      if (!this.wasPausedByVisibility) {
-        log.debug('onTabVisible — not paused by visibility, no-op');
-        return;
-      }
-      this.wasPausedByVisibility = false;
-      this.startWhenReady();
-    });
-
-    if (autoStart) {
-      whenever(
-        this.isReady,
+      const wsConnectTimeout = useTimeoutFn(
         () => {
-          if (this.status.value === 'idle' || this.status.value === 'closed') {
-            this.start();
+          if (this.wsHandle?.readyState === WebSocket.CONNECTING) {
+            this.disconnectWebSocket();
+            if (!this.abortController.signal.aborted && this.status.value !== 'closed') {
+              this.restart();
+            }
           }
         },
-        { immediate: true },
+        STREAM_CONFIG.WEBRTC.WS_CONNECT_TIMEOUT,
+        { immediate: false },
       );
-    }
+
+      const connectTimeout = useTimeoutFn(
+        () => {
+          if (this.webrtcHandler && !this.webrtcHandler.isConnected) {
+            if (this.requestedMode.value === 'auto') {
+              // The failed handler must go — a lingering reference would
+              // swallow setMicrophone() (backchannel never starts) and eat
+              // the backchannel's webrtc/answer frames.
+              this.webrtcHandler.close();
+              this.webrtcHandler = undefined;
+              this.activeMode.value = 'mse';
+              if (this.mseHandler?.isReady) {
+                this.status.value = 'connected';
+              } else {
+                this.startMSE();
+              }
+            } else {
+              this.restart();
+            }
+          }
+        },
+        STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT,
+        { immediate: false },
+      );
+
+      // The MSE path has no other deadline: if the server never answers the
+      // `mse` request, the stream would sit in 'connecting' forever.
+      const mseConnectTimeout = useTimeoutFn(
+        () => {
+          if (this.abortController.signal.aborted || this.status.value === 'connected' || this.status.value === 'closed') return;
+          if (this.mseHandler && !this.mseHandler.isReady) {
+            this.restart();
+          }
+        },
+        STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT,
+        { immediate: false },
+      );
+
+      const reconnectTimeout = useTimeoutFn(
+        () => {
+          if (!this.abortController.signal.aborted) {
+            this.restart();
+          }
+        },
+        STREAM_CONFIG.WEBRTC.RECONNECT_DELAY,
+        { immediate: false },
+      );
+
+      this.startWsConnectTimeout = wsConnectTimeout.start;
+      this.stopWsConnectTimeout = wsConnectTimeout.stop;
+      this.startConnectTimeout = connectTimeout.start;
+      this.stopConnectTimeout = connectTimeout.stop;
+      this.startMseConnectTimeout = mseConnectTimeout.start;
+      this.stopMseConnectTimeout = mseConnectTimeout.stop;
+      this.startReconnectTimeout = reconnectTimeout.start;
+      this.stopReconnectTimeout = reconnectTimeout.stop;
+
+      this.setupWatchers();
+
+      this.offTabPaused = onTabPaused(() => {
+        log.debug(`onTabPaused fired — status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`);
+        if (this.status.value === 'idle' || this.status.value === 'closed') {
+          log.debug(`onTabPaused — already in ${this.status.value}, skipping stop()`);
+          return;
+        }
+        this.wasPausedByVisibility = true;
+        this.stop();
+        log.debug('onTabPaused — stop() done, wasPausedByVisibility=true');
+      });
+
+      this.offTabVisible = onTabVisible(() => {
+        log.debug(
+          `onTabVisible fired — wasPausedByVisibility=${this.wasPausedByVisibility}, status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`,
+        );
+        if (!this.wasPausedByVisibility) {
+          log.debug('onTabVisible — not paused by visibility, no-op');
+          return;
+        }
+        this.wasPausedByVisibility = false;
+        this.startWhenReady();
+      });
+
+      if (autoStart) {
+        whenever(
+          this.isReady,
+          () => {
+            if (this.status.value === 'idle' || this.status.value === 'closed') {
+              this.start();
+            }
+          },
+          { immediate: true },
+        );
+      }
+    });
   }
 
   public async start(): Promise<void> {
@@ -366,7 +391,15 @@ export class StreamConnection implements ReactiveStream {
     this.offTabPaused?.();
     this.offTabPaused = undefined;
 
+    const video = this.videoElement.value;
+    if (video) {
+      if (this.onVideoPauseBound) video.removeEventListener('pause', this.onVideoPauseBound);
+      if (this.onVideoPlayBound) video.removeEventListener('play', this.onVideoPlayBound);
+      if (this.onVideoResizeBound) video.removeEventListener('resize', this.onVideoResizeBound);
+    }
+
     this.stop();
+    this.scope.stop();
   }
 
   public async restart(): Promise<void> {
@@ -687,7 +720,14 @@ export class StreamConnection implements ReactiveStream {
     if (this.abortController.signal.aborted) return;
 
     if (typeof ev.data === 'string') {
-      const msg: Go2RTCMessage = JSON.parse(ev.data);
+      let msg: Go2RTCMessage;
+      try {
+        msg = JSON.parse(ev.data);
+      } catch {
+        // Malformed signaling frame — dropping it beats crashing the whole
+        // WS message dispatch.
+        return;
+      }
       this.handleMessage(msg);
     } else if (this.mseHandler) {
       this.mseHandler.appendBuffer(ev.data);
@@ -761,8 +801,13 @@ export class StreamConnection implements ReactiveStream {
     this.handleFirstFrameWebRTC(stream);
 
     if (this.requestedMode.value === 'auto' && this.mseHandler) {
+      // Client-side close only: go2rtc has no per-consumer stop message, and
+      // the WS must stay open for signaling (candidates, backchannel), so the
+      // server keeps pushing fMP4 for this session — the binary frames are
+      // dropped in handleWsMessage. Known bandwidth cost of auto mode.
       this.mseHandler.close();
       this.mseHandler = undefined;
+      this.stopMseConnectTimeout();
     }
   }
 
@@ -771,6 +816,8 @@ export class StreamConnection implements ReactiveStream {
       this.status.value = 'reconnecting';
 
       if (this.requestedMode.value === 'auto' && this.mseHandler?.isReady) {
+        this.webrtcHandler?.close();
+        this.webrtcHandler = undefined;
         this.activeMode.value = 'mse';
         this.status.value = 'connected';
       } else {
@@ -785,6 +832,8 @@ export class StreamConnection implements ReactiveStream {
     this.stopConnectTimeout();
 
     if (this.requestedMode.value === 'auto') {
+      this.webrtcHandler?.close();
+      this.webrtcHandler = undefined;
       this.activeMode.value = 'mse';
       if (!this.mseHandler?.isReady) {
         this.startMSE();
@@ -798,6 +847,8 @@ export class StreamConnection implements ReactiveStream {
   }
 
   private startMSE(): void {
+    if (this.mseHandler) return;
+
     const video = this.videoElement.value;
     if (this.abortController.signal.aborted || !video) return;
 
@@ -810,6 +861,12 @@ export class StreamConnection implements ReactiveStream {
         if (this.requestedMode.value !== 'auto') {
           this.error.value = err;
           this.status.value = 'error';
+        } else if (this.activeMode.value === 'mse' && this.status.value === 'connected') {
+          // Auto mode with MSE as the active playback: a dead SourceBuffer
+          // (overflow, failed quota eviction) would freeze the video
+          // silently — recover via restart.
+          log.debug('MSE error while active in auto mode — restarting:', err);
+          this.restart();
         }
       },
     });
@@ -817,11 +874,14 @@ export class StreamConnection implements ReactiveStream {
     const codecs = this.mseHandler.setup();
     if (codecs) {
       this.sendWsMessage({ type: 'mse', value: codecs });
+      this.startMseConnectTimeout();
     }
   }
 
   private handleMSEReady(): void {
     if (this.abortController.signal.aborted) return;
+
+    this.stopMseConnectTimeout();
 
     if (this.requestedMode.value === 'auto') {
       if (!this.webrtcHandler?.isConnected) {
@@ -923,16 +983,10 @@ export class StreamConnection implements ReactiveStream {
 
     this.stopConnectTimeout();
     this.stopWsConnectTimeout();
+    this.stopMseConnectTimeout();
     this.stopReconnectTimeout();
 
     this.stopMseMonitor();
-
-    const videoEl = this.videoElement.value;
-    if (videoEl) {
-      if (this.onVideoPauseBound) videoEl.removeEventListener('pause', this.onVideoPauseBound);
-      if (this.onVideoPlayBound) videoEl.removeEventListener('play', this.onVideoPlayBound);
-      if (this.onVideoResizeBound) videoEl.removeEventListener('resize', this.onVideoResizeBound);
-    }
 
     this.lastMediaStream = null;
 

@@ -27,6 +27,34 @@ export function clearCameraCache(): void {
   pendingLoads.clear();
 }
 
+export async function acquireCameraDevice(
+  deviceManager: { getCamera: (id: string) => Promise<ReactiveCameraDevice | undefined> },
+  id: string,
+): Promise<ReactiveCameraDevice | undefined> {
+  if (cameraCache.has(id)) {
+    return cameraCache.acquire(id, () => {
+      throw new Error('Should not create - already cached');
+    });
+  }
+  const pending = pendingLoads.get(id);
+  if (pending) {
+    const device = await pending;
+    return device ? cameraCache.acquire(id, () => device) : undefined;
+  }
+  const loadPromise = deviceManager.getCamera(id);
+  pendingLoads.set(id, loadPromise);
+  try {
+    const device = await loadPromise;
+    return device ? cameraCache.acquire(id, () => device) : undefined;
+  } finally {
+    pendingLoads.delete(id);
+  }
+}
+
+export function releaseCameraDevice(id: string): void {
+  cameraCache.release(id);
+}
+
 export function reconnectAllCameraDevices(): void {
   cameraCache.forEachValue((device) => {
     device.reconnect().catch(() => {});
@@ -68,7 +96,7 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
       _isLoading.value = true;
       try {
         const device = await pending;
-        if (device && cameraCache.has(id)) {
+        if (device && cameraCache.has(id) && toValue(cameraIdOrName) === id) {
           const cached = cameraCache.acquire(id, () => device);
           currentCameraId = id;
           camera.value = cached;
@@ -92,6 +120,10 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
       const device = await loadPromise;
       if (device) {
         cameraCache.acquire(id, () => device);
+        if (toValue(cameraIdOrName) !== id) {
+          cameraCache.release(id);
+          return;
+        }
         currentCameraId = id;
         camera.value = device;
       }

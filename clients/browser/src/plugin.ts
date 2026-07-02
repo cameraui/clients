@@ -27,7 +27,7 @@ function isContext(input: CameraUiContext | CameraUiPluginInput): input is Camer
 function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
   const { natsTransport, target, wsTransport } = input;
 
-  let hasBeenConnected = false;
+  let hasBeenConnected = natsTransport.getClient() !== null;
 
   const rpc = shallowRef<RPCClient | undefined>(natsTransport.getClient() ?? undefined);
   const isConnected = ref(natsTransport.getClient()?.isConnected ?? false);
