@@ -77,6 +77,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
 
   const emitter = new TransportEmitter();
   const handles = new Set<InternalHandle>();
+  const closeDelivered = new WeakSet<WebSocket>();
   let currentTarget: ConnectionTarget | null = null;
   let status: TransportStatus = { up: false };
   let disposed = false;
@@ -118,10 +119,17 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
       for (const fn of [...handle.listeners.open]) fn();
     };
     ws.onclose = (event: CloseEvent) => {
-      if (handle.ws === ws) {
+      const isCurrent = handle.ws === ws;
+      if (isCurrent) {
         handle.ws = null;
         handle.url = null;
       }
+      if (closeDelivered.has(ws)) return;
+      closeDelivered.add(ws);
+      // A stale socket (recycleAll already opened a replacement on this
+      // handle) must not deliver its close — the consumer would tear down
+      // the fresh connection thinking the current one died.
+      if (!isCurrent) return;
       if (isAuthCloseEvent(event)) {
         emitter.emit('auth-error', { message: event.reason || `ws close code ${event.code}` });
       }
@@ -152,10 +160,14 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
       return;
     }
     // Socket already gone — synthesize a close so listeners learn about it.
+    // A CLOSING socket still fires its native onclose later; closeDelivered
+    // makes sure listeners see exactly one close per socket.
     if (handle.ws === ws) {
       handle.ws = null;
       handle.url = null;
     }
+    if (closeDelivered.has(ws)) return;
+    closeDelivered.add(ws);
     const info: WsCloseInfo = { code, reason, wasClean: false };
     for (const fn of [...handle.listeners.close]) fn(info);
   }

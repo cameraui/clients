@@ -30,6 +30,7 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
           kind: 'discovering',
           instanceId: phase.instanceId,
           attempt: 1,
+          transports: phase.transports,
         };
       }
       if (phase.kind === 'needs-auth') {
@@ -50,6 +51,7 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
           kind: 'discovering',
           instanceId: phase.instanceId,
           attempt: 1,
+          transports: phase.transports,
         };
       }
       return phase;
@@ -61,7 +63,7 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
           kind: 'online',
           instanceId: phase.instanceId,
           target: { endpoint: action.endpoint, tokens: action.tokens },
-          transports: EMPTY_TRANSPORTS,
+          transports: phase.transports ?? EMPTY_TRANSPORTS,
         };
       }
       if (phase.kind === 'reconnecting') {
@@ -112,6 +114,11 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
         }
         return { ...phase, transports: next };
       }
+      if (phase.kind === 'discovering') {
+        // Keep the carried map current so the eventual PROBE_SUCCEEDED
+        // enters `online` with an accurate view of the transports.
+        return { ...phase, transports: setStatus(phase.transports ?? EMPTY_TRANSPORTS, action.id, { up: true }) };
+      }
       return phase;
     }
 
@@ -120,6 +127,16 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
         return {
           ...phase,
           transports: setStatus(phase.transports, action.id, {
+            up: false,
+            lastError: action.reason,
+            downSince: ctx.now(),
+          }),
+        };
+      }
+      if (phase.kind === 'discovering') {
+        return {
+          ...phase,
+          transports: setStatus(phase.transports ?? EMPTY_TRANSPORTS, action.id, {
             up: false,
             lastError: action.reason,
             downSince: ctx.now(),

@@ -20,6 +20,7 @@ export interface Persistence {
   readonly detach: Detach;
   peek(): ConnectionTarget | null;
   seed(target: ConnectionTarget): Promise<void>;
+  absorb(target: ConnectionTarget | null): void;
 }
 
 export interface PersistenceOptions {
@@ -127,6 +128,10 @@ export function attachPersistence(options: PersistenceOptions): Persistence {
     seed: async (target) => {
       if (detached) return;
       await persist(target);
+    },
+    absorb: (target) => {
+      if (detached) return;
+      cached = target;
     },
   };
 }

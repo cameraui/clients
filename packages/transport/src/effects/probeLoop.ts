@@ -136,7 +136,10 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
       // for a non-issue.
       if (isProbeFailure(underlying) && underlying.kind === 'aborted') {
         setTimeout(() => {
-          if (!detached) runRound();
+          // Phase re-check: by the time this fires the kernel may have left
+          // discovering (RESET) or a NEW round may already be running —
+          // runRound() would cancel and restart that legitimate round.
+          if (!detached && options.kernel.phase.kind === 'discovering') runRound();
         }, 200);
         return;
       }

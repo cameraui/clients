@@ -11,6 +11,7 @@ export interface CrossTabOptions {
   readonly kernel: Kernel;
   readonly key?: string;
   readonly source?: CrossTabSource;
+  readonly absorb?: (target: ConnectionTarget | null) => void;
   readonly onTokensReceived?: (tokens: ConnectionTarget['tokens']) => void;
   readonly onResetReceived?: () => void;
   readonly onError?: (op: 'parse', err: unknown) => void;
@@ -38,8 +39,10 @@ export function attachCrossTab(options: CrossTabOptions): Detach {
     if (e.key !== key) return;
 
     if (e.newValue === null) {
-      // Another tab cleared the storage entry — i.e. RESET. Only relevant if
-      // we currently hold a session; idle/discovering/offline don't care.
+      // Another tab cleared the storage entry — i.e. RESET. Only dispatch if
+      // we currently hold a session; idle/discovering/offline just drop their
+      // cached copy so a later retry doesn't probe with revoked tokens.
+      options.absorb?.(null);
       const k = options.kernel.phase.kind;
       if (k !== 'online' && k !== 'reconnecting') return;
       options.kernel.dispatch({ type: 'RESET' });
@@ -59,7 +62,15 @@ export function attachCrossTab(options: CrossTabOptions): Detach {
     if (!parsed?.tokens?.access) return;
 
     const k = options.kernel.phase.kind;
-    if (k !== 'online' && k !== 'reconnecting') return;
+    if (k !== 'online' && k !== 'reconnecting') {
+      if (parsed.endpoint?.url) {
+        options.absorb?.({ endpoint: parsed.endpoint, tokens: parsed.tokens });
+        // Still notify — the app may want to retry from needs-auth/idle now
+        // that fresh tokens exist (other-tab login / instance switch).
+        options.onTokensReceived?.(parsed.tokens);
+      }
+      return;
+    }
 
     options.kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: parsed.tokens });
     options.onTokensReceived?.(parsed.tokens);

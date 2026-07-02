@@ -36,6 +36,7 @@ export interface TokenLifecycle {
 const DEFAULT_GRACE_MS = 5_000;
 const DEFAULT_MAX_TRANSIENT_RETRIES = 3;
 const DEFAULT_TRANSIENT_RETRY_DELAY_MS = 2_000;
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifecycle {
   const graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
@@ -65,7 +66,7 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
     cancelTimer();
     const exp = target.tokens.accessExpiresAt;
     if (!exp) return;
-    const delayMs = Math.max(0, exp - now() - graceMs);
+    const delayMs = Math.min(Math.max(0, exp - now() - graceMs), MAX_TIMER_DELAY_MS);
     options.onScheduled?.(delayMs, exp);
     timer = setTimer(() => {
       timer = undefined;
@@ -117,7 +118,17 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
           options.kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: fresh });
           return { tokens: fresh, skipped: true };
         }
-        const tokens = await options.refresh(target, reason);
+        // The `target` captured before the lock can be stale by now: another
+        // tab may have rotated the refresh token while we waited (rotation
+        // invalidates the old one server-side → refreshing with it forces a
+        // logout). Refresh with the freshest tokens visible — persistence
+        // (`fresh`) beats the pre-lock snapshot, the live phase beats the
+        // captured one.
+        const livePhase = options.kernel.phase;
+        const liveTarget = livePhase.kind === 'online' ? livePhase.target : livePhase.kind === 'reconnecting' ? livePhase.lastTarget : null;
+        const base = liveTarget ?? target;
+        const refreshTarget: ConnectionTarget = fresh ? { ...base, tokens: fresh } : base;
+        const tokens = await options.refresh(refreshTarget, reason);
         if (detached) return { tokens, skipped: false };
         options.kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens });
         return { tokens, skipped: false };
@@ -126,6 +137,14 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
       transientRetries = 0;
       if (result.skipped) {
         options.onRefreshSkipped?.(reason, result.tokens);
+        // The dispatch inside the lock is a reducer no-op when the tokens are
+        // identical — no phase change, so the kernel subscriber never re-arms
+        // the proactive timer. Re-arm explicitly or the next refresh would
+        // only ever happen reactively via auth-error.
+        const p = options.kernel.phase;
+        if (p.kind === 'online' && timer === undefined) {
+          schedule(p.target);
+        }
       } else {
         options.onRefreshSuccess?.(reason, result.tokens);
       }

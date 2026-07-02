@@ -49,6 +49,7 @@ export type ConnectionPhase =
       readonly kind: 'discovering';
       readonly instanceId: string;
       readonly attempt: number;
+      readonly transports?: ReadonlyMap<TransportId, TransportStatus>;
     }
   | {
       readonly kind: 'online';

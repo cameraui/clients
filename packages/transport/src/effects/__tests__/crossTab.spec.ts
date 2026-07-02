@@ -170,16 +170,20 @@ describe('attachCrossTab — filtering + error handling', () => {
     expect(onTokensReceived).not.toHaveBeenCalled();
   });
 
-  it('ignores events when phase is idle / discovering / offline', () => {
+  it('does not dispatch in idle / discovering / offline, but absorbs and notifies', () => {
     const source = new EventTarget();
     const kernel = createKernel({ context: makeCtx(), initial: IDLE_PHASE });
     const onTokensReceived = vi.fn();
-    attachCrossTab({ kernel, source, onTokensReceived });
+    const absorb = vi.fn();
+    attachCrossTab({ kernel, source, onTokensReceived, absorb });
 
     fireStorage(source, 'camera.ui:transport:target', jsonTarget({ endpoint: LAN, tokens: TOKENS_NEW }));
 
-    expect(onTokensReceived).not.toHaveBeenCalled();
+    // No kernel dispatch — but the persistence cache is updated and the app
+    // notified so it can retry from a dead-end phase with the fresh tokens.
     expect(kernel.phase.kind).toBe('idle');
+    expect(absorb).toHaveBeenCalledWith({ endpoint: LAN, tokens: TOKENS_NEW });
+    expect(onTokensReceived).toHaveBeenCalledWith(TOKENS_NEW);
   });
 });
 

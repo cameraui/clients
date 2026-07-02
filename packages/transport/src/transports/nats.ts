@@ -69,9 +69,9 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   let status: TransportStatus = { up: false };
   let statusAbort: AbortController | null = null;
   let disposed = false;
-  // Stable for the lifetime of the current RPCClient (regenerated per rebuildClient).
-  // Kept in sync between the proxy URL (?connId=) and the client's reply subjects.
   let connId: string | null = null;
+  let applyEpoch = 0;
+  let pendingConnectAbort: AbortController | null = null;
 
   function buildServers(target: ConnectionTarget): string[] {
     const url = new URL(target.endpoint.url);
@@ -162,8 +162,9 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     markDown(message);
   }
 
-  async function rebuildClient(target: ConnectionTarget): Promise<void> {
+  async function rebuildClient(target: ConnectionTarget, epoch: number): Promise<void> {
     stopStatusMonitor();
+    pendingConnectAbort?.abort();
     if (proxy) {
       try {
         proxy.abortClose();
@@ -195,17 +196,38 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       ignoreAuthErrorAbort: true,
     });
 
+    const connectAbort = new AbortController();
+    pendingConnectAbort = connectAbort;
+
     try {
-      await next.connect();
+      await next.connect({ signal: connectAbort.signal });
     } catch (err) {
       try {
         next.abortClose();
       } catch {
         // ignore
       }
+      if (disposed || epoch !== applyEpoch) {
+        // Superseded while pending — a newer apply()/dispose() owns the
+        // state now; stay silent.
+        return;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       markDown(msg);
       throw err;
+    } finally {
+      if (pendingConnectAbort === connectAbort) pendingConnectAbort = null;
+    }
+
+    if (disposed || epoch !== applyEpoch) {
+      // The connect resolved late — after a newer apply(null)/apply(target)/
+      // dispose(). Installing it would hijack the newer state; discard it.
+      try {
+        next.abortClose();
+      } catch {
+        // ignore
+      }
+      return;
     }
 
     proxy = next;
@@ -220,11 +242,14 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     if (disposed) throw new Error('nats-transport disposed');
     if (isSameTarget(currentTarget, target)) return;
 
+    const epoch = ++applyEpoch;
     const endpointChanged = isEndpointChange(currentTarget, target);
     currentTarget = target;
 
     if (!target) {
       stopStatusMonitor();
+      pendingConnectAbort?.abort();
+      pendingConnectAbort = null;
       if (proxy) {
         try {
           proxy.abortClose();
@@ -239,7 +264,15 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     }
 
     if (endpointChanged || !proxy) {
-      await rebuildClient(target);
+      try {
+        await rebuildClient(target, epoch);
+      } catch (err) {
+        // Failed rebuild must not leave currentTarget pointing at a target
+        // we never connected to — the same-target dedupe (here and in
+        // transportSync) would otherwise swallow every retry.
+        if (epoch === applyEpoch && currentTarget === target) currentTarget = null;
+        throw err;
+      }
       return;
     }
 
@@ -268,7 +301,10 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
 
   async function dispose(): Promise<void> {
     disposed = true;
+    applyEpoch++;
     stopStatusMonitor();
+    pendingConnectAbort?.abort();
+    pendingConnectAbort = null;
     if (proxy) {
       try {
         proxy.abortClose();
@@ -284,12 +320,14 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   }
 
   function getClient(): RPCClient | null {
-    return proxy;
+    // Same gating as notifyClient: while down, consumers must see null even
+    // though the lib-internal reconnect keeps the proxy reference alive.
+    return status.up ? proxy : null;
   }
 
   function subscribeClient(listener: NatsClientListener): Unsubscribe {
     clientListeners.add(listener);
-    listener(proxy);
+    listener(status.up ? proxy : null);
     return () => clientListeners.delete(listener);
   }
 

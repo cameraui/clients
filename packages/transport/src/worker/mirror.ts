@@ -47,7 +47,7 @@ export function createWorkerKernelMirror(options: WorkerKernelMirrorOptions): Wo
     lastGeneration = msg.generation;
     const prev = current;
     current = msg.phase;
-    if (prev === current) return;
+    if (phaseEquals(prev, current)) return;
     for (const l of [...listeners]) {
       try {
         l(current, prev);
@@ -63,6 +63,20 @@ export function createWorkerKernelMirror(options: WorkerKernelMirrorOptions): Wo
     if (p.kind === 'online') return p.target;
     if (p.kind === 'reconnecting') return p.lastTarget;
     return null;
+  }
+
+  function phaseEquals(a: ConnectionPhase, b: ConnectionPhase): boolean {
+    if (a.kind !== b.kind) return false;
+    const ta = targetOf(a);
+    const tb = targetOf(b);
+    if (ta === null || tb === null) return ta === tb;
+    return (
+      ta.endpoint.url === tb.endpoint.url &&
+      ta.endpoint.mode === tb.endpoint.mode &&
+      ta.tokens.access === tb.tokens.access &&
+      ta.tokens.proxySession === tb.tokens.proxySession &&
+      ta.tokens.refresh === tb.tokens.refresh
+    );
   }
 
   return {
