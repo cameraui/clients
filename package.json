@@ -31,9 +31,9 @@
   "devDependencies": {
     "@types/node": "^26.1.0",
     "@vue/language-core": "^3.3.6",
-    "tsx": "^4.22.4",
+    "tsx": "^4.22.5",
     "typescript": "5.9.3",
-    "updates": "^17.18.1"
+    "updates": "^17.18.2"
   },
   "overrides": {
     "@vue/language-core": "$@vue/language-core"
