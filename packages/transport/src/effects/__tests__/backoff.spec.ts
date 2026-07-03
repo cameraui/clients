@@ -266,3 +266,41 @@ describe('attachBackoff — detach', () => {
     expect(onScheduled).not.toHaveBeenCalled();
   });
 });
+
+describe('attachBackoff — firstAttemptDelayMs', () => {
+  it('shortens only the first attempt', () => {
+    const kernel = createKernel({ context: makeCtx([1_500, 5_000]), initial: offlineWith() });
+    const onScheduled = vi.fn();
+    const dispatchSpy = vi.spyOn(kernel, 'dispatch');
+    attachBackoff({ kernel, schedule: [5_000, 5_000], firstAttemptDelayMs: () => 1_500, onScheduled });
+
+    expect(onScheduled).toHaveBeenCalledWith(1, 1_500);
+    vi.advanceTimersByTime(1_500);
+    expect(dispatchSpy).toHaveBeenCalledWith({ type: 'USER_RETRY' });
+
+    // Second offline entry (retry failed) — hook no longer applies.
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'still down' });
+    expect(onScheduled).toHaveBeenLastCalledWith(2, 5_000);
+  });
+
+  it('cannot extend the schedule', () => {
+    const kernel = createKernel({ context: makeCtx([1_000]), initial: offlineWith() });
+    const onScheduled = vi.fn();
+    attachBackoff({ kernel, schedule: [1_000], firstAttemptDelayMs: () => 60_000, onScheduled });
+    expect(onScheduled).toHaveBeenCalledWith(1, 1_000);
+  });
+
+  it('never undercuts a server backoff hint', () => {
+    const kernel = createKernel({ context: makeCtx([1_500]), initial: offlineWith(T0 + 30_000) });
+    const onScheduled = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => 1_500, onScheduled });
+    expect(onScheduled).toHaveBeenCalledWith(1, 30_000);
+  });
+
+  it('falls back to the schedule when the hook returns null', () => {
+    const kernel = createKernel({ context: makeCtx([5_000]), initial: offlineWith() });
+    const onScheduled = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => null, onScheduled });
+    expect(onScheduled).toHaveBeenCalledWith(1, 5_000);
+  });
+});

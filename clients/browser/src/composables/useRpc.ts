@@ -175,7 +175,7 @@ export function useRpcSubscription(subscribeFn: (rpc: RPCClient) => Promise<() =
       // reconnect.
       const current = ctx.rpc.value;
       if (!disposed && current && current !== rpc) {
-        void bind(current);
+        bind(current);
       }
     }
   }

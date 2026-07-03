@@ -6,6 +6,7 @@ export type Detach = () => void;
 export interface BackoffOptions {
   readonly kernel: Kernel;
   readonly schedule?: readonly number[];
+  readonly firstAttemptDelayMs?: () => number | null | undefined;
   readonly now?: () => number;
   readonly setTimer?: (cb: () => void, ms: number) => unknown;
   readonly clearTimer?: (handle: unknown) => void;
@@ -44,10 +45,14 @@ export function attachBackoff(options: BackoffOptions): Detach {
     // Two sources for the delay: our own local `schedule[attempt]` (the
     // exponential bucket), and `phase.nextRetryAt` (potentially extended
     // by a server-issued BACKOFF_HINT). We take the LATER of the two —
-    // never shorten under any source. Premature retries are the riskier
-    // mode: they hammer the backend right when it's already strained.
+    // never shorten below the server hint. Premature retries are the riskier
+    // mode: they hammer the backend right when it's already strained. The
+    // firstAttemptDelayMs hook may shorten only the LOCAL schedule, and only
+    // for the first attempt (transient-failure fast path).
     cancelTimer(isReschedule ? 'rescheduled' : undefined);
-    const scheduleDelay = schedule[Math.min(attempt, schedule.length - 1)]!;
+    const baseDelay = schedule[Math.min(attempt, schedule.length - 1)]!;
+    const quick = attempt === 0 ? options.firstAttemptDelayMs?.() : undefined;
+    const scheduleDelay = typeof quick === 'number' && quick >= 0 ? Math.min(quick, baseDelay) : baseDelay;
     const phaseDelay = Math.max(0, phase.nextRetryAt - now());
     const delay = Math.max(scheduleDelay, phaseDelay);
     options.onScheduled?.(attempt + 1, delay);
