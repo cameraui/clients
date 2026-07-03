@@ -56,7 +56,7 @@
   },
   "dependencies": {
     "@camera.ui/logger": ">=0.0.3",
-    "@camera.ui/rpc": ">=1.0.8",
+    "@camera.ui/rpc": ">=1.0.9",
     "axios": ">=1.18.1",
     "socket.io-client": ">=4.8.3"
   },
