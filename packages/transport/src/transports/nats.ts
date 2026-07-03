@@ -24,6 +24,7 @@ export interface NatsTransportOptions {
   readonly reconnectionDelayMax?: number;
   readonly reconnectionRandomizationFactor?: number;
   readonly timeout?: number;
+  readonly connectTimeout?: number;
   readonly pingInterval?: number;
   readonly pingTimeout?: number;
   readonly maxPingOut?: number;
@@ -60,6 +61,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   const reconnectionDelayMax = options.reconnectionDelayMax ?? 5_000;
   const reconnectionRandomizationFactor = options.reconnectionRandomizationFactor ?? 0.5;
   const timeout = options.timeout ?? 10_000;
+  const connectTimeout = options.connectTimeout ?? 5_000;
   const pingInterval = options.pingInterval ?? 25_000;
   const pingTimeout = options.pingTimeout ?? 20_000;
   const maxPingOut = options.maxPingOut ?? 1;
@@ -198,6 +200,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       reconnectionDelayMax,
       reconnectionRandomizationFactor,
       timeout,
+      connectTimeout,
       pingInterval,
       pingTimeout,
       maxPingOut,
