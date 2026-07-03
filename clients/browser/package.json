@@ -29,7 +29,7 @@
   },
   "peerDependencies": {
     "@camera.ui/logger": ">=0.0.2",
-    "@camera.ui/rpc": ">=1.0.7",
+    "@camera.ui/rpc": ">=1.0.8",
     "@camera.ui/sdk": ">=0.0.11",
     "@camera.ui/transport": ">=0.0.1",
     "@vueuse/core": ">=14.3.0",
@@ -37,7 +37,7 @@
   },
   "devDependencies": {
     "@camera.ui/logger": "file:../../packages/logger",
-    "@camera.ui/rpc": "^1.0.7",
+    "@camera.ui/rpc": "^1.0.8",
     "@camera.ui/sdk": "~0.0.11",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.3.1",
