@@ -2,6 +2,7 @@ import { io, Manager } from 'socket.io-client';
 
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
 
+import type { Logger } from '@camera.ui/logger';
 import type { Socket } from 'socket.io-client';
 import type { ConnectionTarget, TransportSpec, TransportStatus } from '../core/types.js';
 import type { Transport, TransportEvent, TransportEventHandler, Unsubscribe } from './contract.js';
@@ -23,6 +24,7 @@ export interface SocketioTransportOptions {
   readonly reconnectionDelay?: number;
   readonly reconnectionDelayMax?: number;
   readonly timeout?: number;
+  readonly logger?: Logger;
 }
 
 export interface SocketioTransport extends Transport {
@@ -40,6 +42,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   const reconnectionDelay = options.reconnectionDelay ?? 1_000;
   const reconnectionDelayMax = options.reconnectionDelayMax ?? 5_000;
   const timeout = options.timeout ?? 20_000;
+  const logger = options.logger;
 
   const emitter = new TransportEmitter();
   const sockets = new Map<string, Socket>();
@@ -63,12 +66,14 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   function markUp(): void {
     if (status.up) return;
     status = { up: true };
+    logger?.debug('markUp');
     emitter.emit('up', undefined);
   }
 
   function markDown(reason: string): void {
     if (!status.up && status.lastError === reason) return;
     status = { up: false, lastError: reason };
+    logger?.debug(`markDown (${reason})`);
     emitter.emit('down', { reason });
   }
 
@@ -102,6 +107,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     socket.on('disconnect', (reason: string) => markDown(reason));
     socket.on('connect_error', (err: Error) => {
       const msg = err?.message ?? 'connect_error';
+      logger?.debug(`connect_error (main): ${msg}`);
       if (isAuthError(msg)) {
         emitter.emit('auth-error', { message: msg });
         return;
@@ -233,12 +239,15 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   function reviveDeadSockets(): void {
     if (!currentTarget) return;
     const auth = buildAuth(currentTarget);
+    let revived = 0;
     for (const sock of sockets.values()) {
       if (!sock.connected) {
         sock.auth = auth;
         sock.connect();
+        revived++;
       }
     }
+    logger?.debug(`reviveDeadSockets: ${revived}/${sockets.size} reconnecting`);
   }
 
   return {

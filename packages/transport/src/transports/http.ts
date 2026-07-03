@@ -2,6 +2,7 @@ import axios from 'axios';
 
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
 
+import type { Logger } from '@camera.ui/logger';
 import type { AxiosError, AxiosInstance, AxiosRequestConfig, GenericAbortSignal, InternalAxiosRequestConfig } from 'axios';
 import type { ConnectionTarget, TransportSpec, TransportStatus } from '../core/types.js';
 import type { Transport, TransportEvent, TransportEventHandler, Unsubscribe } from './contract.js';
@@ -17,6 +18,7 @@ export interface HttpTransportOptions {
   readonly timeoutMs?: number;
   readonly targetWaitMs?: number;
   readonly spec?: Partial<TransportSpec>;
+  readonly logger?: Logger;
 }
 
 interface TargetWaiter {
@@ -32,6 +34,8 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
   const spec: TransportSpec = { ...HTTP_SPEC, ...options.spec };
   const apiPrefix = options.apiPrefix ?? '/api';
   const targetWaitMs = options.targetWaitMs ?? 15_000;
+  const logger = options.logger;
+
   const emitter = new TransportEmitter();
 
   let currentTarget: ConnectionTarget | null = null;
@@ -99,6 +103,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
     (response) => {
       if (!status.up) {
         status = { up: true };
+        logger?.debug('markUp');
         emitter.emit('up', undefined);
       }
       return response;
@@ -110,6 +115,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
         return Promise.reject(error);
       }
       if (error.response.status === 401) {
+        logger?.debug(`auth-error 401 (${error.config?.url ?? 'unknown-url'})`);
         emitter.emit('auth-error', { status: 401, message: extractMessage(error) });
       }
       return Promise.reject(error);
@@ -119,6 +125,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
   function markDown(reason: string): void {
     if (status.up || status.lastError !== reason) {
       status = { up: false, lastError: reason };
+      logger?.debug(`markDown (${reason})`);
       emitter.emit('down', { reason });
     }
   }

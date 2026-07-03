@@ -2,6 +2,7 @@ import { createRPCClient } from '@camera.ui/rpc';
 
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
 
+import type { Logger } from '@camera.ui/logger';
 import type { RPCClient } from '@camera.ui/rpc';
 import type { ConnectionTarget, TransportSpec, TransportStatus } from '../core/types.js';
 import type { Transport, TransportEvent, TransportEventHandler, Unsubscribe } from './contract.js';
@@ -26,6 +27,7 @@ export interface NatsTransportOptions {
   readonly pingInterval?: number;
   readonly pingTimeout?: number;
   readonly maxPingOut?: number;
+  readonly logger?: Logger;
 }
 
 export type NatsClientListener = (client: RPCClient | null) => void;
@@ -61,6 +63,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   const pingInterval = options.pingInterval ?? 25_000;
   const pingTimeout = options.pingTimeout ?? 20_000;
   const maxPingOut = options.maxPingOut ?? 1;
+  const logger = options.logger;
 
   const emitter = new TransportEmitter();
   const clientListeners = new Set<NatsClientListener>();
@@ -102,12 +105,14 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   function markUp(): void {
     if (status.up) return;
     status = { up: true };
+    logger?.debug('markUp');
     emitter.emit('up', undefined);
   }
 
   function markDown(reason: string): void {
     if (!status.up && status.lastError === reason) return;
     status = { up: false, lastError: reason };
+    logger?.debug(`markDown (${reason})`);
     emitter.emit('down', { reason });
   }
 
@@ -126,6 +131,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       if (!iter) return;
       for await (const event of iter) {
         if (abort.signal.aborted) break;
+        logger?.debug(`status: ${event.type}${'server' in event && event.server ? ` server=${String(event.server)}` : ''}`);
         switch (event.type) {
           case 'reconnect':
             markUp();
@@ -163,6 +169,8 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   }
 
   async function rebuildClient(target: ConnectionTarget, epoch: number): Promise<void> {
+    logger?.debug(`rebuildClient start (epoch=${epoch})`);
+    const t0 = Date.now();
     stopStatusMonitor();
     pendingConnectAbort?.abort();
     if (proxy) {
@@ -213,6 +221,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
         return;
       }
       const msg = err instanceof Error ? err.message : String(err);
+      logger?.debug(`rebuildClient connect FAILED after ${Date.now() - t0}ms: ${msg}`);
       markDown(msg);
       throw err;
     } finally {
@@ -231,6 +240,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     }
 
     proxy = next;
+    logger?.debug(`rebuildClient connected in ${Date.now() - t0}ms`);
     // markUp BEFORE notifyClient — notifyClient gates on status.up, so we
     // need the up-flag set before we tell listeners we have a live client.
     markUp();
@@ -333,12 +343,25 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
 
   async function probeAlive(timeoutMs = 5_000): Promise<void> {
     if (!proxy) throw new Error('nats-transport: no client');
-    await proxy.flush(timeoutMs);
+    const t0 = Date.now();
+    try {
+      await proxy.flush(timeoutMs);
+      logger?.debug(`probeAlive OK in ${Date.now() - t0}ms`);
+    } catch (err) {
+      logger?.debug(`probeAlive FAILED after ${Date.now() - t0}ms: ${err instanceof Error ? err.message : String(err)}`);
+      throw err;
+    }
   }
 
   async function forceReconnect(): Promise<void> {
-    if (!proxy) return;
+    if (!proxy) {
+      logger?.debug('forceReconnect: no client');
+      return;
+    }
+    logger?.debug(`forceReconnect: issuing (up=${status.up} stale=${proxy.isStale})`);
+    const t0 = Date.now();
     await proxy.forceReconnect();
+    logger?.debug(`forceReconnect: returned after ${Date.now() - t0}ms (up=${status.up})`);
   }
 
   return {

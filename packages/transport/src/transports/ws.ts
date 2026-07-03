@@ -1,5 +1,6 @@
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
 
+import type { Logger } from '@camera.ui/logger';
 import type { ConnectionTarget, TransportSpec, TransportStatus } from '../core/types.js';
 import type { PerResourceTransport, TransportEvent, TransportEventHandler, Unsubscribe } from './contract.js';
 
@@ -54,6 +55,7 @@ export interface WsTransportOptions {
   readonly webSocketCtor?: typeof WebSocket;
   readonly tokenParam?: string;
   readonly sessionParam?: string;
+  readonly logger?: Logger;
 }
 
 export interface WsTransport extends PerResourceTransport<WsHandle, WsHandleSpec> {
@@ -74,6 +76,8 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
   const tokenParam = options.tokenParam ?? 'token';
   const sessionParam = options.sessionParam ?? 'session';
   const WsCtor = options.webSocketCtor ?? (typeof WebSocket !== 'undefined' ? WebSocket : undefined);
+
+  const logger = options.logger;
 
   const emitter = new TransportEmitter();
   const handles = new Set<InternalHandle>();
@@ -112,6 +116,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
   function bindWs(handle: InternalHandle, ws: WebSocket): void {
     ws.onopen = () => {
       if (handle.disposed || handle.ws !== ws) return;
+      logger?.debug(`open ${handle.spec.path}`);
       if (!status.up) {
         status = { up: true };
         emitter.emit('up', undefined);
@@ -130,6 +135,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
       // handle) must not deliver its close — the consumer would tear down
       // the fresh connection thinking the current one died.
       if (!isCurrent) return;
+      logger?.debug(`close ${handle.spec.path} code=${event.code} clean=${event.wasClean}${event.reason ? ` reason=${event.reason}` : ''}`);
       if (isAuthCloseEvent(event)) {
         emitter.emit('auth-error', { message: event.reason || `ws close code ${event.code}` });
       }
@@ -187,6 +193,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
   function recycleAll(code: number, reason: string): void {
     // Snapshot first — `close` listeners may dispose their handle (mutates `handles`).
     const snapshot = [...handles];
+    logger?.debug(`recycleAll (${reason}) handles=${snapshot.length}`);
     for (const handle of snapshot) {
       closeWs(handle, code, reason);
     }
