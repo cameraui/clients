@@ -38,7 +38,7 @@
   "devDependencies": {
     "@camera.ui/logger": "file:../../packages/logger",
     "@camera.ui/rpc": "^1.0.9",
-    "@camera.ui/sdk": "~0.0.11",
+    "@camera.ui/sdk": "~0.0.12",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.3.1",
     "@microsoft/api-extractor": "^7.58.9",
