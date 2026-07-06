@@ -42,8 +42,8 @@ jobs:
           CAMERA_UI_TOKEN: ${{ secrets.CAMERA_UI_TOKEN }}
         run: |
           git config --global url."https://x-access-token:${CAMERA_UI_TOKEN}@github.com/".insteadOf "https://github.com/"
-          if ! GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/seydx/camera.ui3.git HEAD >/dev/null 2>&1; then
-            echo "::error::Token cannot access seydx/camera.ui3"
+          if ! GIT_TERMINAL_PROMPT=0 git ls-remote https://github.com/cameraui/camera.ui.git HEAD >/dev/null 2>&1; then
+            echo "::error::Token cannot access cameraui/camera.ui"
             exit 1
           fi
           git submodule update --init --depth 1 externals/camera.ui
