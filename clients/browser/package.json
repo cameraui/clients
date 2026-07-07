@@ -44,7 +44,7 @@
     "@microsoft/api-extractor": "^7.58.9",
     "@stylistic/eslint-plugin": "^5.10.0",
     "@types/webrtc": "^0.0.47",
-    "@typescript-eslint/parser": "^8.62.1",
+    "@typescript-eslint/parser": "^8.63.0",
     "@vitejs/plugin-vue": "^6.0.7",
     "@vue/eslint-config-prettier": "^10.2.0",
     "@vue/eslint-config-typescript": "^14.9.0",
