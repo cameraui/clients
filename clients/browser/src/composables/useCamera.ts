@@ -95,10 +95,23 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
   async function fetchSnapshot(sourceId: string, forceNew?: boolean): Promise<ArrayBuffer | undefined> {
     snapshotLoading.value = true;
     try {
-      const result = await rpcCall(rpcRef, (client) => client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).snapshot(sourceId, forceNew));
-      if (result && result.byteLength > 0) {
-        setSnapshot(initialCamera._id, result);
-        return result;
+      try {
+        const result = await rpcCall(rpcRef, (client) =>
+          client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).snapshotWithMeta(sourceId, forceNew),
+        );
+        if (result && result.data.byteLength > 0) {
+          setSnapshot(initialCamera._id, result.data, Date.now() - result.ageMs);
+          return result.data;
+        }
+        return undefined;
+      } catch {
+        // Older servers don't expose snapshotWithMeta — fall back to the legacy
+        // call, where only forced fetches have a known fetch time.
+        const result = await rpcCall(rpcRef, (client) => client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).snapshot(sourceId, forceNew));
+        if (result && result.byteLength > 0) {
+          setSnapshot(initialCamera._id, result, forceNew ? Date.now() : undefined);
+          return result;
+        }
       }
     } finally {
       snapshotLoading.value = false;
@@ -136,7 +149,8 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
         frameWorkerConnected.value = event.data;
         break;
       case 'snapshot:updated':
-        setSnapshot(initialCamera._id, event.data.snapshot);
+        // Pushes are always fresh — the server fetches with forceNew before emitting.
+        setSnapshot(initialCamera._id, event.data.snapshot, Date.now());
         break;
     }
   }

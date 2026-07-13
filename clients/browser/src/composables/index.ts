@@ -7,7 +7,7 @@ export { useCoreManager } from './useCoreManager.js';
 export { useDeviceManager } from './useDeviceManager.js';
 export { clearOAuthCache, useOAuth } from './useOAuth.js';
 export { clearPluginCache, usePlugin } from './usePlugin.js';
-export { useSnapshot, clearSnapshotCache, getSnapshotUrl } from './useSnapshot.js';
+export { useSnapshot, clearSnapshotCache, getSnapshotTimestamp, getSnapshotUrl } from './useSnapshot.js';
 export {
   acquireSensorManager,
   clearSensorCache,

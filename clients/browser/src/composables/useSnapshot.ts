@@ -11,6 +11,7 @@ import type { DBCamera } from '../server/index.js';
 export interface UseSnapshotReturn {
   snapshot: ShallowRef<ArrayBuffer | undefined>;
   snapshotSrc: ComputedRef<string | undefined>;
+  snapshotTimestamp: ComputedRef<number | undefined>;
   isLoading: ComputedRef<boolean>;
   refresh: () => Promise<void>;
 }
@@ -18,6 +19,7 @@ export interface UseSnapshotReturn {
 const REVOKE_DELAY_MS = 5000;
 
 const snapshotCache = new Map<string, ArrayBuffer>();
+const timestampCache = new Map<string, number>();
 const urlCache = new Map<string, string>();
 const subscribers = new Map<string, Set<() => void>>();
 
@@ -29,7 +31,7 @@ function deferRevoke(url: string): void {
   setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
 }
 
-export function setSnapshot(cameraId: string, data: ArrayBuffer): void {
+export function setSnapshot(cameraId: string, data: ArrayBuffer, fetchedAt?: number): void {
   // Buffer is being replaced — schedule revocation of the old blob URL so the
   // next read produces a fresh URL bound to the new bytes, but keep the old
   // URL valid long enough for any pending img fetches to complete.
@@ -39,11 +41,20 @@ export function setSnapshot(cameraId: string, data: ArrayBuffer): void {
     urlCache.delete(cameraId);
   }
   snapshotCache.set(cameraId, data);
+  // Without a known fetch time (e.g. legacy servers serving their TTL cache)
+  // the previous stamp is left untouched — never guess Date.now().
+  if (fetchedAt !== undefined) {
+    timestampCache.set(cameraId, fetchedAt);
+  }
   notify(cameraId);
 }
 
 export function getSnapshot(cameraId: string): ArrayBuffer | undefined {
   return snapshotCache.get(cameraId);
+}
+
+export function getSnapshotTimestamp(cameraId: string): number | undefined {
+  return timestampCache.get(cameraId);
 }
 
 export function subscribeSnapshot(cameraId: string, cb: () => void): () => void {
@@ -71,6 +82,7 @@ export function clearSnapshotCache(): void {
   for (const url of urlCache.values()) URL.revokeObjectURL(url);
   urlCache.clear();
   snapshotCache.clear();
+  timestampCache.clear();
 }
 
 export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>): UseSnapshotReturn {
@@ -90,6 +102,13 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     return getSnapshotUrl(id);
   });
 
+  const snapshotTimestamp = computed(() => {
+    if (!snapshot.value) return undefined;
+    const idOrName = toValue(cameraIdOrName);
+    const id = typeof idOrName === 'string' ? idOrName : idOrName._id;
+    return timestampCache.get(id);
+  });
+
   function subscribe(cameraId: string): () => void {
     if (!subscribers.has(cameraId)) {
       subscribers.set(cameraId, new Set());
@@ -104,6 +123,41 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
   }
 
   let unsubscribe: (() => void) | undefined;
+  let heldDeviceId: string | undefined;
+  let pendingHoldId: string | undefined;
+
+  // Hold the device for the composable's lifetime — closing it (refcount 0)
+  // kills its `snapshot:updated` subscription, so server auto-refresh pushes
+  // would never reach views that only render snapshots (e.g. the dashboard).
+  async function holdDevice(id: string): Promise<void> {
+    if (heldDeviceId === id || pendingHoldId === id) return;
+    pendingHoldId = id;
+    try {
+      const device = await acquireCameraDevice(deviceManager, id);
+      if (!device) return;
+
+      const idOrName = toValue(cameraIdOrName);
+      const currentId = typeof idOrName === 'string' ? idOrName : idOrName._id;
+      if (currentId !== id || heldDeviceId === id) {
+        releaseCameraDevice(id);
+        return;
+      }
+
+      releaseHeldDevice();
+      heldDeviceId = id;
+    } catch {
+      // Camera may be offline / RPC timeout — silently ignore
+    } finally {
+      pendingHoldId = undefined;
+    }
+  }
+
+  function releaseHeldDevice(): void {
+    if (heldDeviceId) {
+      releaseCameraDevice(heldDeviceId);
+      heldDeviceId = undefined;
+    }
+  }
 
   async function loadSnapshot(id: string): Promise<void> {
     if (!isConnected.value || !id) return;
@@ -122,6 +176,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
         if (device) {
           const result = await device.fetchSnapshot();
           if (result) {
+            // The fetch path already stamped the timestamp — don't touch it here.
             setSnapshot(id, result);
             snapshot.value = result;
           }
@@ -182,13 +237,16 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
 
       if (connected && id && !disabled) {
         unsubscribe = subscribe(id);
+        await holdDevice(id);
         await loadSnapshot(id);
       } else if (id) {
         // Disconnected OR disabled — keep cached snapshot visible (if any) but
         // don't trigger new fetches. The card's disabled overlay renders on top.
+        releaseHeldDevice();
         snapshot.value = snapshotCache.get(id);
         initialLoadDone.value = true;
       } else {
+        releaseHeldDevice();
         snapshot.value = undefined;
       }
     },
@@ -197,11 +255,13 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
 
   tryOnScopeDispose(() => {
     unsubscribe?.();
+    releaseHeldDevice();
   });
 
   return {
     snapshot,
     snapshotSrc,
+    snapshotTimestamp,
     isLoading: computed(() => _isLoading.value || !initialLoadDone.value),
     refresh,
   };
