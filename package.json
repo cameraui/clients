@@ -33,7 +33,7 @@
     "@vue/language-core": "^3.3.7",
     "tsx": "^4.23.1",
     "typescript": "5.9.3",
-    "updates": "^17.18.2"
+    "updates": "^17.19.1"
   },
   "overrides": {
     "@vue/language-core": "$@vue/language-core"
