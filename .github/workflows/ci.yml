@@ -49,7 +49,7 @@ jobs:
           git submodule update --init --depth 1 externals/camera.ui
           git config --global --unset url."https://x-access-token:${CAMERA_UI_TOKEN}@github.com/".insteadOf || true
 
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
 
@@ -64,7 +64,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: "22"
       - run: npm ci
