@@ -46,7 +46,7 @@
     "@stylistic/eslint-plugin": "^5.10.0",
     "@types/webrtc": "^0.0.47",
     "@typescript-eslint/parser": "^8.64.0",
-    "@vitejs/plugin-vue": "^6.0.7",
+    "@vitejs/plugin-vue": "^6.0.8",
     "@vue/eslint-config-prettier": "^10.2.0",
     "@vue/eslint-config-typescript": "^14.9.0",
     "@vue/language-core": "^3.3.7",
