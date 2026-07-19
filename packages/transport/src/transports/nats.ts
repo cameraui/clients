@@ -82,10 +82,11 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     const url = new URL(target.endpoint.url);
     const wsProtocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
     const port = url.port || (url.protocol === 'https:' ? '443' : '80');
+    const prefix = url.pathname.replace(/\/$/, '');
     const params = new URLSearchParams({ token: target.tokens.access });
     if (target.tokens.proxySession) params.set('session', target.tokens.proxySession);
     if (connId) params.set('connId', connId);
-    return [`${wsProtocol}//${url.hostname}:${port}${proxyPath}?${params.toString()}`];
+    return [`${wsProtocol}//${url.hostname}:${port}${prefix}${proxyPath}?${params.toString()}`];
   }
 
   function notifyClient(): void {

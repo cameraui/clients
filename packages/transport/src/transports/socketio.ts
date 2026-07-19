@@ -125,10 +125,19 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     bindCommonAuthEvents(socket);
   }
 
+  function socketOrigin(target: ConnectionTarget): string {
+    return new URL(target.endpoint.url).origin;
+  }
+
+  function socketPath(target: ConnectionTarget): string {
+    const prefix = new URL(target.endpoint.url).pathname.replace(/\/$/, '');
+    return `${prefix}${path}`;
+  }
+
   function openSocket(namespace: string, target: ConnectionTarget): Socket {
-    const url = `${target.endpoint.url}${namespace}`;
+    const url = `${socketOrigin(target)}${namespace}`;
     const sock = io(url, {
-      path,
+      path: socketPath(target),
       auth: buildAuth(target),
       query: buildQuery(target),
       reconnection,
@@ -144,8 +153,8 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
   function rebuildManager(target: ConnectionTarget): void {
     closeAllSockets();
-    manager = new Manager(target.endpoint.url, {
-      path,
+    manager = new Manager(socketOrigin(target), {
+      path: socketPath(target),
       autoConnect: false,
       reconnection,
       reconnectionDelay,
@@ -171,14 +180,6 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   }
 
   function rebindAuth(target: ConnectionTarget): void {
-    // Update auth in place — `sock.auth` is a live property and is read at
-    // every (re)connect handshake. For a CONNECTED socket we deliberately do
-    // NOT force a disconnect: socket.io validates tokens only at handshake
-    // time, so a live session keeps running and picks up the fresh token on
-    // its next natural reconnect (avoids a visible drop on every refresh).
-    // For a socket that is DOWN — server-booted on a rotated-out token, or
-    // dropped while backgrounded and not auto-reconnecting — the fresh token
-    // is exactly what it needs, so reconnect it now instead of leaving it dead.
     const auth = buildAuth(target);
     for (const sock of sockets.values()) {
       sock.auth = auth;

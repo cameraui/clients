@@ -97,13 +97,14 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
     const base = new URL(target.endpoint.url);
     const wsProtocol = base.protocol === 'https:' ? 'wss:' : 'ws:';
     const port = base.port || (base.protocol === 'https:' ? '443' : '80');
+    const prefix = base.pathname.replace(/\/$/, '');
     const params = new URLSearchParams();
     for (const [k, v] of Object.entries(handleSpec.query ?? {})) {
       if (v !== undefined && v !== null && v !== '') params.set(k, v);
     }
     params.set(tokenParam, target.tokens.access);
     if (target.tokens.proxySession) params.set(sessionParam, target.tokens.proxySession);
-    return `${wsProtocol}//${base.hostname}:${port}${handleSpec.path}?${params.toString()}`;
+    return `${wsProtocol}//${base.hostname}:${port}${prefix}${handleSpec.path}?${params.toString()}`;
   }
 
   function isAuthCloseEvent(event: CloseEvent): boolean {
