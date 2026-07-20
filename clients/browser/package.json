@@ -31,7 +31,7 @@
   "peerDependencies": {
     "@camera.ui/logger": ">=0.0.2",
     "@camera.ui/rpc": ">=1.0.9",
-    "@camera.ui/sdk": ">=0.0.25",
+    "@camera.ui/sdk": ">=0.0.27",
     "@camera.ui/transport": ">=0.0.1",
     "@vueuse/core": ">=14.3.0",
     "vue": ">=3.5.40"
@@ -39,7 +39,7 @@
   "devDependencies": {
     "@camera.ui/logger": "file:../../packages/logger",
     "@camera.ui/rpc": "^1.0.9",
-    "@camera.ui/sdk": "~0.0.25",
+    "@camera.ui/sdk": "~0.0.27",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.3.1",
     "@microsoft/api-extractor": "^7.58.11",
@@ -54,7 +54,7 @@
     "@vueuse/core": "^14.3.0",
     "@webgpu/types": "^0.1.71",
     "eslint": "9.39.2",
-    "eslint-plugin-vue": "^10.9.2",
+    "eslint-plugin-vue": "^10.10.0",
     "globals": "^17.7.0",
     "prettier": "^3.9.5",
     "rimraf": "^6.1.3",
