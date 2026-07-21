@@ -42,7 +42,7 @@
     "@camera.ui/sdk": "~0.0.28",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.3.1",
-    "@microsoft/api-extractor": "^7.58.11",
+    "@microsoft/api-extractor": "^7.58.12",
     "@stylistic/eslint-plugin": "^5.10.0",
     "@types/webrtc": "^0.0.47",
     "@typescript-eslint/parser": "^8.65.0",
