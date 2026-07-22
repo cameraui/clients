@@ -93,6 +93,11 @@ describe('normalizeBody', () => {
     expect(normalizeBody(cfg({ data: 'not-json', headers: AxiosHeaders.from({ 'Content-Type': 'application/json' }) }))).toBe('not-json');
     expect(normalizeBody(cfg({ data: 'raw=1', headers: AxiosHeaders.from({ 'Content-Type': 'text/plain' }) }))).toBe('raw=1');
   });
+
+  it('drops an explicit null body (iOS bridges null to NSNull and fails the request)', () => {
+    expect(normalizeBody(cfg({ data: null }))).toBeUndefined();
+    expect(normalizeBody(cfg({ data: null, headers: AxiosHeaders.from({ 'Content-Type': 'application/json' }) }))).toBeUndefined();
+  });
 });
 
 describe('createNativeHttpAdapter', () => {

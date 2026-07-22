@@ -164,6 +164,10 @@ function normalizeParams(params: unknown): Record<string, string> | undefined {
 
 export function normalizeBody(config: InternalAxiosRequestConfig): unknown {
   const data: unknown = config.data;
+  // axios keeps an explicit null body (e.g. put(url, null)); the Capacitor
+  // bridge turns null into NSNull and iOS fails the request with
+  // CapacitorUrlRequestError. undefined drops the key entirely.
+  if (data == null) return undefined;
   if (typeof data !== 'string') return data;
   const contentType = String(AxiosHeaders.from(config.headers as AxiosHeaders).get('Content-Type') ?? '');
   if (contentType.includes('application/json')) {
