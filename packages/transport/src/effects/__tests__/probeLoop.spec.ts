@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createKernel } from '../../core/kernel.js';
 import { attachProbeLoop, makeProbeFailure } from '../probeLoop.js';
 
-import type { ConnectionPhase, Endpoint, ReducerContext, Tokens, TransportSpec } from '../../core/types.js';
+import type { ConnectionPhase, Endpoint, ReducerContext, Tokens } from '../../core/types.js';
 import type { ProbeContext } from '../probeLoop.js';
 
 type ProbeFn = (ctx: ProbeContext) => Promise<Tokens>;
@@ -12,14 +12,12 @@ const LAN: Endpoint = { url: 'https://nvr.local', mode: 'direct-lan', priority: 
 const WAN: Endpoint = { url: 'https://nvr.example.com', mode: 'direct-wan', priority: 1 };
 const TOKENS: Tokens = { access: 'at' };
 
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([['http', { id: 'http', kind: 'request', phaseGating: false }]]);
-
 function makeCtx(): ReducerContext {
-  return { specs: SPECS, now: () => Date.now() };
+  return { now: () => Date.now() };
 }
 
 function discoveringPhase(instanceId = 'a'): ConnectionPhase {
-  return { kind: 'discovering', instanceId, attempt: 1 };
+  return { kind: 'discovering', instanceId };
 }
 
 describe('attachProbeLoop — race semantics', () => {

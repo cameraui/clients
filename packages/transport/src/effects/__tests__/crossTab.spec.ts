@@ -3,33 +3,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { createKernel } from '../../core/kernel.js';
 import { attachCrossTab } from '../crossTab.js';
 
-import type { ConnectionPhase, ConnectionTarget, Endpoint, ReducerContext, Tokens, TransportSpec } from '../../core/types.js';
+import type { ConnectionPhase, ConnectionTarget, Endpoint, ReducerContext, Tokens } from '../../core/types.js';
 
 const LAN: Endpoint = { url: 'https://nvr.local', mode: 'direct-lan', priority: 0 };
 const WAN: Endpoint = { url: 'https://nvr.example.com', mode: 'direct-wan', priority: 1 };
 const TOKENS_OLD: Tokens = { access: 'at-old', refresh: 'rt-old' };
 const TOKENS_NEW: Tokens = { access: 'at-new', refresh: 'rt-new' };
 
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([['http', { id: 'http', kind: 'request', phaseGating: false }]]);
-
 function makeCtx(): ReducerContext {
-  return { specs: SPECS, now: () => Date.now() };
+  return { now: () => Date.now() };
 }
 
 const ONLINE_PHASE: ConnectionPhase = {
   kind: 'online',
   instanceId: 'a',
   target: { endpoint: LAN, tokens: TOKENS_OLD },
-  transports: new Map(),
-};
-
-const RECONNECTING_PHASE: ConnectionPhase = {
-  kind: 'reconnecting',
-  instanceId: 'a',
-  lastTarget: { endpoint: LAN, tokens: TOKENS_OLD },
-  cause: 'transport-down',
-  since: 0,
-  transports: new Map(),
 };
 
 const IDLE_PHASE: ConnectionPhase = { kind: 'idle' };
@@ -60,17 +48,6 @@ describe('attachCrossTab — TOKENS_REFRESHED forwarding', () => {
     expect(onTokensReceived).toHaveBeenCalledWith(TOKENS_NEW);
   });
 
-  it('works in reconnecting phase too — updates lastTarget tokens', () => {
-    const source = new EventTarget();
-    const kernel = createKernel({ context: makeCtx(), initial: RECONNECTING_PHASE });
-    attachCrossTab({ kernel, source });
-
-    fireStorage(source, 'camera.ui:transport:target', jsonTarget({ endpoint: LAN, tokens: TOKENS_NEW }));
-
-    if (kernel.phase.kind !== 'reconnecting') throw new Error('expected reconnecting');
-    expect(kernel.phase.lastTarget?.tokens).toEqual(TOKENS_NEW);
-  });
-
   it('keeps the endpoint as-is — only the tokens are pulled from the storage event', () => {
     const source = new EventTarget();
     const kernel = createKernel({ context: makeCtx(), initial: ONLINE_PHASE });
@@ -97,16 +74,6 @@ describe('attachCrossTab — RESET on cleared storage', () => {
 
     expect(kernel.phase.kind).toBe('idle');
     expect(onResetReceived).toHaveBeenCalledOnce();
-  });
-
-  it('dispatches RESET in reconnecting phase too', () => {
-    const source = new EventTarget();
-    const kernel = createKernel({ context: makeCtx(), initial: RECONNECTING_PHASE });
-    attachCrossTab({ kernel, source });
-
-    fireStorage(source, 'camera.ui:transport:target', null);
-
-    expect(kernel.phase.kind).toBe('idle');
   });
 
   it('ignores cleared-storage when we are idle (nothing to log out from)', () => {

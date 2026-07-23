@@ -16,7 +16,11 @@ export interface RaceFirstOptions {
   readonly timeoutByMode?: TimeoutByModeFn;
   readonly shortCircuit?: (err: unknown) => boolean;
   readonly parentSignal?: AbortSignal;
+  readonly prefer?: (endpoint: Endpoint) => boolean;
+  readonly preferGraceMs?: number;
 }
+
+const DEFAULT_PREFER_GRACE_MS = 400;
 
 export interface RaceFirstResult<T> {
   readonly endpoint: Endpoint;
@@ -38,7 +42,8 @@ export class RaceFirstError extends Error {
 }
 
 export function raceFirst<T>(candidates: readonly RaceCandidate<T>[], options: RaceFirstOptions = {}): Promise<RaceFirstResult<T>> {
-  const { timeoutByMode = (mode) => DEFAULT_RACE_TIMEOUT_BY_MODE[mode] ?? 5_000, shortCircuit, parentSignal } = options;
+  const { timeoutByMode = (mode) => DEFAULT_RACE_TIMEOUT_BY_MODE[mode] ?? 5_000, shortCircuit, parentSignal, prefer } = options;
+  const preferGraceMs = options.preferGraceMs ?? DEFAULT_PREFER_GRACE_MS;
 
   return new Promise<RaceFirstResult<T>>((resolve, reject) => {
     if (candidates.length === 0) {
@@ -53,6 +58,8 @@ export function raceFirst<T>(candidates: readonly RaceCandidate<T>[], options: R
 
     let settled = false;
     let remaining = candidates.length;
+    let pendingPreferred = prefer ? candidates.filter((c) => prefer(c.endpoint)).length : 0;
+    let held: { endpoint: Endpoint; value: T; ctrl: AbortController } | null = null;
     const lastErrors = new Map<Endpoint, unknown>();
     const abortControllers: AbortController[] = [];
     const timers: ReturnType<typeof setTimeout>[] = [];
@@ -70,6 +77,23 @@ export function raceFirst<T>(candidates: readonly RaceCandidate<T>[], options: R
       cleanupAllExcept(except);
       if (onParentAbort) parentSignal?.removeEventListener('abort', onParentAbort);
       resolve({ endpoint, value });
+    }
+
+    function settleHeld(): void {
+      if (!held) return;
+      finishSuccess(held.endpoint, held.value, held.ctrl);
+    }
+
+    function handleSuccess(endpoint: Endpoint, value: T, ctrl: AbortController): void {
+      if (settled) return;
+      if (!prefer || prefer(endpoint) || pendingPreferred <= 0) {
+        finishSuccess(endpoint, value, ctrl);
+        return;
+      }
+      if (held) return; // first held result wins if no preferred shows up
+      held = { endpoint, value, ctrl };
+      const holdTimer = setTimeout(settleHeld, preferGraceMs);
+      timers.push(holdTimer);
     }
 
     function finishFail(error: RaceFirstError): void {
@@ -91,11 +115,19 @@ export function raceFirst<T>(candidates: readonly RaceCandidate<T>[], options: R
       timers.push(timer);
 
       cand.run(ctrl.signal).then(
-        (value) => finishSuccess(cand.endpoint, value, ctrl),
+        (value) => handleSuccess(cand.endpoint, value, ctrl),
         (err) => {
           if (settled) {
             lastErrors.set(cand.endpoint, err);
             return;
+          }
+          if (prefer?.(cand.endpoint)) {
+            pendingPreferred--;
+            if (held && pendingPreferred <= 0) {
+              lastErrors.set(cand.endpoint, err);
+              settleHeld();
+              return;
+            }
           }
           // Distinguish self-timeout (per-candidate signal) from parent-abort
           // and from genuine errors — the consumer of `RaceFirstError.cause`

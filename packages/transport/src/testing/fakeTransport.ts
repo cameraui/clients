@@ -12,6 +12,9 @@ export class FakeTransport implements Transport {
   readonly spec: TransportSpec;
   readonly applyCalls: (ConnectionTarget | null)[] = [];
 
+  failNextApplies = 0;
+  ensureAliveCalls = 0;
+
   private readonly emitter = new TransportEmitter();
   private readonly applyDelayMs: number;
   private currentTarget: ConnectionTarget | null = null;
@@ -29,6 +32,11 @@ export class FakeTransport implements Transport {
     if (this.applyDelayMs > 0) {
       await new Promise((resolve) => setTimeout(resolve, this.applyDelayMs));
     }
+    if (this.failNextApplies > 0) {
+      this.failNextApplies--;
+      this.currentStatus = { up: false, lastError: 'apply failed' };
+      throw new Error('apply failed');
+    }
     this.currentTarget = target;
     this.currentStatus = target ? { up: true } : { up: false };
     if (target) {
@@ -39,6 +47,11 @@ export class FakeTransport implements Transport {
   }
 
   health(): TransportStatus {
+    return this.currentStatus;
+  }
+
+  async ensureAlive(): Promise<TransportStatus> {
+    this.ensureAliveCalls++;
     return this.currentStatus;
   }
 

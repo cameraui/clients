@@ -1,17 +1,18 @@
 import { createRPCClient } from '@camera.ui/rpc';
 
+import { classifyClose } from './closeCodes.js';
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
 
 import type { Logger } from '@camera.ui/logger';
 import type { RPCClient } from '@camera.ui/rpc';
 import type { ConnectionTarget, TransportSpec, TransportStatus } from '../core/types.js';
+import type { CloseLike } from './closeCodes.js';
 import type { Transport, TransportEvent, TransportEventHandler, Unsubscribe } from './contract.js';
 
 const NATS_SPEC: TransportSpec = {
   id: 'nats',
   kind: 'persistent',
   phaseGating: true,
-  graceMs: 4_000,
 };
 
 export interface NatsTransportOptions {
@@ -38,6 +39,7 @@ export interface NatsTransport extends Transport {
   subscribeClient(listener: NatsClientListener): Unsubscribe;
   probeAlive(timeoutMs?: number): Promise<void>;
   forceReconnect(): Promise<void>;
+  ensureAlive(): Promise<TransportStatus>;
 }
 
 function newConnId(): string {
@@ -163,9 +165,22 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
 
   function handleErrorEvent(event: { data?: unknown }): void {
     const message = stringifyError(event.data);
-    const lower = message.toLowerCase();
-    if (lower.includes('auth') || lower.includes('401') || lower.includes('forbidden') || lower.includes('403')) {
+    // per-subject permission violations don't kill the connection — marking
+    // down would brick a healthy socket with no reconnect event to revive it
+    if (message.toLowerCase().includes('permissions violation')) {
+      logger?.warn(`permission violation (connection stays up): ${message}`);
+      return;
+    }
+    const cls = classifyClose(typeof event.data === 'object' && event.data !== null ? { ...(event.data as object), message } : message);
+    if (cls === 'auth-expired') {
       emitter.emit('auth-error', { message });
+      return;
+    }
+    if (cls === 'forbidden') {
+      // refreshing cannot fix a 4403 — mark down without the auth-error that
+      // used to trigger a refresh loop
+      logger?.warn(`forbidden by server: ${message}`);
+      markDown(`forbidden: ${message}`);
       return;
     }
     markDown(message);
@@ -226,6 +241,11 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       }
       const msg = err instanceof Error ? err.message : String(err);
       logger?.debug(`rebuildClient connect FAILED after ${Date.now() - t0}ms: ${msg}`);
+      // a 4401 at connect means the URL token is stale — without this the dial
+      // loop retries the same dead token until the next rotation
+      if (classifyClose(err instanceof Error ? (err as CloseLike) : msg) === 'auth-expired') {
+        emitter.emit('auth-error', { message: msg });
+      }
       markDown(msg);
       throw err;
     } finally {
@@ -368,6 +388,44 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     logger?.debug(`forceReconnect: returned after ${Date.now() - t0}ms (up=${status.up})`);
   }
 
+  let ensureInflight: Promise<TransportStatus> | null = null;
+
+  function ensureAlive(): Promise<TransportStatus> {
+    if (ensureInflight) return ensureInflight;
+    const run = async (): Promise<TransportStatus> => {
+      if (disposed || !currentTarget) return health();
+      if (!proxy) {
+        // no client and no dial loop — rebuild from the current target, the
+        // one state neither the lib nor the status iterator can recover from
+        const epoch = ++applyEpoch;
+        try {
+          await rebuildClient(currentTarget, epoch);
+        } catch {
+          // markDown happened inside rebuildClient
+        }
+        return health();
+      }
+      if (health().up) {
+        try {
+          await probeAlive(3_000);
+          return health();
+        } catch {
+          // proved dead, fall through to the forced redial
+        }
+      }
+      try {
+        await forceReconnect();
+      } catch {
+        // failures surface via the status iterator's down event
+      }
+      return health();
+    };
+    ensureInflight = run().finally(() => {
+      ensureInflight = null;
+    });
+    return ensureInflight;
+  }
+
   return {
     spec,
     apply,
@@ -378,6 +436,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     subscribeClient,
     probeAlive,
     forceReconnect,
+    ensureAlive,
   };
 }
 

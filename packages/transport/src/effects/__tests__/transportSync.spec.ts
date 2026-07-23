@@ -15,7 +15,7 @@ const SPECS: ReadonlyMap<string, TransportSpec> = new Map([
 ]);
 
 function makeCtx(): ReducerContext {
-  return { specs: SPECS, now: () => Date.now() };
+  return { now: () => Date.now() };
 }
 
 function tokensWith(access: string, accessExpiresAt = Date.now() + 60_000): Tokens {
@@ -27,18 +27,7 @@ function targetWith(endpoint: Endpoint, access: string, accessExpiresAt = Date.n
 }
 
 function onlinePhase(target: ConnectionTarget): ConnectionPhase {
-  return { kind: 'online', instanceId: 'a', target, transports: new Map() };
-}
-
-function reconnectingPhase(lastTarget: ConnectionTarget | null): ConnectionPhase {
-  return {
-    kind: 'reconnecting',
-    instanceId: 'a',
-    lastTarget,
-    cause: 'transport-down',
-    since: Date.now(),
-    transports: new Map(),
-  };
+  return { kind: 'online', instanceId: 'a', target };
 }
 
 describe('attachTransportSync — initial state', () => {
@@ -66,7 +55,7 @@ describe('attachTransportSync — initial state', () => {
   it('skips initial apply when kernel is discovering', () => {
     const kernel = createKernel({
       context: makeCtx(),
-      initial: { kind: 'discovering', instanceId: 'a', attempt: 0 },
+      initial: { kind: 'discovering', instanceId: 'a' },
     });
     const http = new FakeTransport({ spec: SPECS.get('http')! });
 
@@ -90,30 +79,15 @@ describe('attachTransportSync — phase transitions', () => {
     expect(http.applyCalls).toEqual([null, { endpoint: LAN, tokens }]);
   });
 
-  it('forwards lastTarget on online → reconnecting (phase-gating transport down)', () => {
-    const target = targetWith(LAN, 'at-0');
-    const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
-    const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
-    attachTransportSync({ kernel, transports: [socketio] });
-
-    kernel.dispatch({ type: 'TRANSPORT_DOWN_CONFIRMED', id: 'socketio' });
-
-    // online apply + reconnecting apply (lastTarget = target) → 2 calls,
-    // but target is identical → dedupe kicks in, stays at 1
-    expect(socketio.applyCalls).toEqual([target]);
-  });
-
-  it('forwards refreshed tokens during reconnecting', () => {
+  it('forwards refreshed tokens while online', () => {
     const target = targetWith(LAN, 'at-0');
     const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
     const http = new FakeTransport({ spec: SPECS.get('http')! });
     attachTransportSync({ kernel, transports: [http] });
 
-    // Trigger reconnecting via socketio confirmation. Stay on same target — dedup keeps it at 1 apply.
-    kernel.dispatch({ type: 'TRANSPORT_DOWN_CONFIRMED', id: 'socketio' });
     expect(http.applyCalls).toEqual([target]);
 
-    // Refresh tokens during reconnecting. New AT → new target → apply fires.
+    // New AT → new target → apply fires.
     const refreshed = { ...target.tokens, access: 'at-1' };
     kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: refreshed });
 
@@ -121,13 +95,26 @@ describe('attachTransportSync — phase transitions', () => {
     expect(http.applyCalls[1]).toMatchObject({ tokens: { access: 'at-1' } });
   });
 
-  it('applies null on online → offline (TOKENS_INVALID)', () => {
+  it('applies null on online → offline (transient TOKENS_INVALID)', () => {
     const target = targetWith(LAN, 'at-0');
     const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
     const http = new FakeTransport({ spec: SPECS.get('http')! });
     attachTransportSync({ kernel, transports: [http] });
 
-    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'refresh failed' });
+    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'refresh failed', transient: true });
+    expect(kernel.phase.kind).toBe('offline');
+
+    expect(http.applyCalls).toEqual([target, null]);
+  });
+
+  it('applies null on online → needs-auth (permanent TOKENS_INVALID)', () => {
+    const target = targetWith(LAN, 'at-0');
+    const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
+    const http = new FakeTransport({ spec: SPECS.get('http')! });
+    attachTransportSync({ kernel, transports: [http] });
+
+    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'refresh rejected' });
+    expect(kernel.phase.kind).toBe('needs-auth');
 
     expect(http.applyCalls).toEqual([target, null]);
   });
@@ -149,7 +136,7 @@ describe('attachTransportSync — phase transitions', () => {
     const http = new FakeTransport({ spec: SPECS.get('http')! });
     attachTransportSync({ kernel, transports: [http] });
 
-    // online → offline → discovering. Offline tears down. Discovering hold-state — no new apply.
+    // online → needs-auth → discovering. Needs-auth tears down. Discovering hold-state — no new apply.
     kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'bad' });
     expect(http.applyCalls).toEqual([target, null]);
 
@@ -239,13 +226,108 @@ describe('attachTransportSync — detach', () => {
   });
 });
 
-describe('attachTransportSync — reconnecting from null', () => {
-  it('applies null when reconnecting has no lastTarget', () => {
-    const kernel = createKernel({ context: makeCtx(), initial: reconnectingPhase(null) });
-    const http = new FakeTransport({ spec: SPECS.get('http')! });
+describe('attachTransportSync — per-transport rollback and retry', () => {
+  async function flush(): Promise<void> {
+    await Promise.resolve();
+    await Promise.resolve();
+  }
 
-    attachTransportSync({ kernel, transports: [http] });
+  it('retries a failed apply with the same target while healthy transports are left alone', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = targetWith(LAN, 'at-0');
+      const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
+      const http = new FakeTransport({ spec: SPECS.get('http')! });
+      const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
+      socketio.failNextApplies = 1;
+      const onError = vi.fn();
+      const onRetry = vi.fn();
 
-    expect(http.applyCalls).toEqual([null]);
+      attachTransportSync({ kernel, transports: [http, socketio], retryMs: 2_000, onError, onRetry });
+      await flush();
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(socketio.applyCalls).toEqual([target]);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(onRetry).toHaveBeenCalledTimes(1);
+      expect(socketio.applyCalls).toEqual([target, target]);
+      expect(socketio.target).toBe(target);
+      expect(http.applyCalls).toEqual([target]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps retrying until apply succeeds', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = targetWith(LAN, 'at-0');
+      const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
+      const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
+      socketio.failNextApplies = 3;
+
+      attachTransportSync({ kernel, transports: [socketio], retryMs: 1_000 });
+      await flush();
+      await vi.advanceTimersByTimeAsync(3_000);
+
+      expect(socketio.applyCalls).toEqual([target, target, target, target]);
+      expect(socketio.target).toBe(target);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(socketio.applyCalls.length).toBe(4);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a pending retry holds through discovering and applies after the next commit', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = targetWith(LAN, 'at-0');
+      const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
+      const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
+      socketio.failNextApplies = 1;
+
+      attachTransportSync({ kernel, transports: [socketio], retryMs: 1_000 });
+      await flush();
+
+      // discovering is only reachable via offline now — the null apply on
+      // offline is expected teardown, the retry then idles through discovering
+      kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'down' });
+      await flush();
+      kernel.dispatch({ type: 'USER_RETRY' });
+      expect(kernel.phase.kind).toBe('discovering');
+      await vi.advanceTimersByTimeAsync(1_500);
+      expect(socketio.applyCalls).toEqual([target, null]);
+
+      kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: tokensWith('at-0') });
+      await flush();
+      expect(socketio.applyCalls.length).toBe(3);
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(socketio.target).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('detach cancels pending retries', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = targetWith(LAN, 'at-0');
+      const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
+      const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
+      socketio.failNextApplies = 1;
+
+      const detach = attachTransportSync({ kernel, transports: [socketio], retryMs: 1_000 });
+      await flush();
+      detach();
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      expect(socketio.applyCalls).toEqual([target]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

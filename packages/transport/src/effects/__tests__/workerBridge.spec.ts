@@ -3,16 +3,14 @@ import { describe, expect, it, vi } from 'vitest';
 import { createKernel } from '../../core/kernel.js';
 import { attachWorkerBridge } from '../workerBridge.js';
 
-import type { ConnectionPhase, Endpoint, ReducerContext, Tokens, TransportSpec } from '../../core/types.js';
+import type { ConnectionPhase, Endpoint, ReducerContext, Tokens } from '../../core/types.js';
 import type { KernelSyncMessage, WorkerHost, WorkerMessage } from '../../worker/protocol.js';
 
 const LAN: Endpoint = { url: 'https://nvr.local', mode: 'direct-lan' };
 const TOKENS: Tokens = { access: 'at-1' };
 
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([['http', { id: 'http', kind: 'request', phaseGating: false }]]);
-
 function makeCtx(): ReducerContext {
-  return { specs: SPECS, now: () => Date.now() };
+  return { now: () => Date.now() };
 }
 
 function onlinePhase(): ConnectionPhase {
@@ -20,7 +18,6 @@ function onlinePhase(): ConnectionPhase {
     kind: 'online',
     instanceId: 'a',
     target: { endpoint: LAN, tokens: TOKENS },
-    transports: new Map(),
   };
 }
 

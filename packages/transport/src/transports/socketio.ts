@@ -1,5 +1,6 @@
 import { io, Manager } from 'socket.io-client';
 
+import { classifyClose } from './closeCodes.js';
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
 
 import type { Logger } from '@camera.ui/logger';
@@ -13,7 +14,6 @@ const SOCKETIO_SPEC: TransportSpec = {
   id: 'socketio',
   kind: 'persistent',
   phaseGating: true,
-  graceMs: 4_000,
 };
 
 export interface SocketioTransportOptions {
@@ -24,6 +24,7 @@ export interface SocketioTransportOptions {
   readonly reconnectionDelay?: number;
   readonly reconnectionDelayMax?: number;
   readonly timeout?: number;
+  readonly staleAfterMs?: number;
   readonly logger?: Logger;
 }
 
@@ -32,6 +33,7 @@ export interface SocketioTransport extends Transport {
   socket(namespace?: string): Socket | null;
   ensureSocket(namespace: string): Socket | null;
   reviveDeadSockets(): void;
+  ensureAlive(): Promise<TransportStatus>;
 }
 
 export function createSocketioTransport(options: SocketioTransportOptions = {}): SocketioTransport {
@@ -50,6 +52,17 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   let currentTarget: ConnectionTarget | null = null;
   let status: TransportStatus = { up: false };
   let disposed = false;
+
+  const staleAfterMs = options.staleAfterMs ?? 60_000;
+  let lastActivityAt = 0;
+
+  function touchActivity(): void {
+    lastActivityAt = Date.now();
+  }
+
+  function isStaleNow(): boolean {
+    return lastActivityAt > 0 && Date.now() - lastActivityAt > staleAfterMs;
+  }
 
   function buildAuth(target: ConnectionTarget): Record<string, unknown> {
     const auth: Record<string, unknown> = { token: `Bearer ${target.tokens.access}` };
@@ -78,28 +91,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   }
 
   function isAuthError(msg: string): boolean {
-    const m = msg.toLowerCase();
-    return m.includes('auth') || m.includes('unauthorized');
-  }
-
-  function bindCommonAuthEvents(socket: Socket): void {
-    let rotatedOut = false;
-    socket.on('unauthenticated', () => {
-      const fresh = currentTarget ? buildAuth(currentTarget) : null;
-      const current = (socket.auth as { token?: string } | undefined)?.token;
-      if (fresh && current !== fresh.token) {
-        socket.auth = fresh;
-        rotatedOut = true;
-      } else {
-        emitter.emit('auth-error', { message: 'unauthenticated' });
-      }
-    });
-    socket.on('disconnect', () => {
-      if (rotatedOut) {
-        rotatedOut = false;
-        socket.connect();
-      }
-    });
+    return classifyClose(msg) === 'auth-expired';
   }
 
   function bindMainSocketEvents(socket: Socket): void {
@@ -114,7 +106,6 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
       }
       markDown(msg);
     });
-    bindCommonAuthEvents(socket);
   }
 
   function bindSecondarySocketEvents(socket: Socket): void {
@@ -122,7 +113,6 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
       const msg = err?.message ?? 'connect_error';
       if (isAuthError(msg)) emitter.emit('auth-error', { message: msg });
     });
-    bindCommonAuthEvents(socket);
   }
 
   function socketOrigin(target: ConnectionTarget): string {
@@ -165,6 +155,13 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     });
     const main = openSocket(mainNs, target);
     bindMainSocketEvents(main);
+
+    // the sockets ride io()'s cached manager (main.io), not the local
+    // `manager` instance — activity must be observed there
+    lastActivityAt = Date.now();
+    main.io.on('open', touchActivity);
+    main.io.on('ping', touchActivity);
+    main.io.on('packet', touchActivity);
   }
 
   function closeAllSockets(): void {
@@ -196,6 +193,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
     if (!target) {
       closeAllSockets();
+      lastActivityAt = 0;
       markDown('detached');
       return;
     }
@@ -208,6 +206,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   }
 
   function health(): TransportStatus {
+    if (status.up && isStaleNow()) return { up: false, lastError: 'staleConnection' };
     return status;
   }
 
@@ -239,6 +238,15 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
   function reviveDeadSockets(): void {
     if (!currentTarget) return;
+    if (status.up && isStaleNow()) {
+      // engine still claims connected but the wall clock says the socket died
+      // in background — force-close it so every namespace reconnects now
+      // instead of after the engine's own ping timeout
+      logger?.debug('reviveDeadSockets: engine stale — forcing reconnect');
+      lastActivityAt = Date.now();
+      sockets.get(mainNs)?.io.engine?.close();
+      return;
+    }
     const auth = buildAuth(currentTarget);
     let revived = 0;
     for (const sock of sockets.values()) {
@@ -249,6 +257,12 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
       }
     }
     logger?.debug(`reviveDeadSockets: ${revived}/${sockets.size} reconnecting`);
+  }
+
+  async function ensureAlive(): Promise<TransportStatus> {
+    if (disposed || !currentTarget) return health();
+    reviveDeadSockets();
+    return health();
   }
 
   return {
@@ -265,5 +279,6 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     socket,
     ensureSocket,
     reviveDeadSockets,
+    ensureAlive,
   };
 }

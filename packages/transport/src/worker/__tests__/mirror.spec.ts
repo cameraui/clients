@@ -13,7 +13,6 @@ function onlinePhase(): ConnectionPhase {
     kind: 'online',
     instanceId: 'a',
     target: { endpoint: LAN, tokens: TOKENS },
-    transports: new Map(),
   };
 }
 
@@ -81,20 +80,8 @@ describe('createWorkerKernelMirror', () => {
     expect(mirror.target?.endpoint).toBe(LAN);
     expect(mirror.target?.tokens).toBe(TOKENS);
 
-    // reconnecting → lastTarget is the target
-    const reconnecting: ConnectionPhase = {
-      kind: 'reconnecting',
-      instanceId: 'a',
-      lastTarget: { endpoint: LAN, tokens: TOKENS },
-      cause: 'transport-down',
-      since: 0,
-      transports: new Map(),
-    };
-    source.deliver(makeSyncMessage(2, reconnecting));
-    expect(mirror.target?.endpoint).toBe(LAN);
-
     // offline → no target
-    source.deliver(makeSyncMessage(3, { kind: 'offline', instanceId: 'a', lastError: 'x', nextRetryAt: 0 }));
+    source.deliver(makeSyncMessage(2, { kind: 'offline', instanceId: 'a', lastError: 'x', nextRetryAt: 0 }));
     expect(mirror.target).toBeNull();
   });
 

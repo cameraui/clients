@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { isEndpointChange, isSameTarget, isTokenOnlyChange, TransportEmitter } from '../contract.js';
+import { isEndpointChange, isSameTarget, TransportEmitter } from '../contract.js';
 
 import type { ConnectionTarget } from '../../core/types.js';
 
@@ -41,22 +41,18 @@ describe('isSameTarget', () => {
   });
 });
 
-describe('isEndpointChange / isTokenOnlyChange', () => {
+describe('isEndpointChange', () => {
   it('endpoint change is reported', () => {
     expect(isEndpointChange(T_A, T_B)).toBe(true);
-    expect(isTokenOnlyChange(T_A, T_B)).toBe(false);
   });
   it('token-only change is reported', () => {
     expect(isEndpointChange(T_A, T_A_TOKEN2)).toBe(false);
-    expect(isTokenOnlyChange(T_A, T_A_TOKEN2)).toBe(true);
   });
   it('no change reports both false', () => {
     expect(isEndpointChange(T_A, T_A)).toBe(false);
-    expect(isTokenOnlyChange(T_A, T_A)).toBe(false);
   });
   it('null-to-target counts as endpoint change, not token-only', () => {
     expect(isEndpointChange(null, T_A)).toBe(true);
-    expect(isTokenOnlyChange(null, T_A)).toBe(false);
   });
 });
 

@@ -3,33 +3,21 @@ import { describe, expect, it, vi } from 'vitest';
 import { createKernel } from '../../core/kernel.js';
 import { attachPersistence, memoryStorageAdapter } from '../persistence.js';
 
-import type { ConnectionPhase, ConnectionTarget, Endpoint, ReducerContext, Tokens, TransportSpec } from '../../core/types.js';
+import type { ConnectionPhase, ConnectionTarget, Endpoint, ReducerContext, Tokens } from '../../core/types.js';
 
 const LAN: Endpoint = { url: 'https://nvr.local', mode: 'direct-lan', priority: 0 };
 const WAN: Endpoint = { url: 'https://nvr.example.com', mode: 'direct-wan', priority: 1 };
 const TOKENS: Tokens = { access: 'at', refresh: 'rt', accessExpiresAt: 9_999_999_999_000 };
 const TARGET: ConnectionTarget = { endpoint: LAN, tokens: TOKENS };
 
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([['http', { id: 'http', kind: 'request', phaseGating: false }]]);
-
 function makeCtx(): ReducerContext {
-  return { specs: SPECS, now: () => Date.now() };
+  return { now: () => Date.now() };
 }
 
 const ONLINE_PHASE: ConnectionPhase = {
   kind: 'online',
   instanceId: 'a',
   target: TARGET,
-  transports: new Map(),
-};
-
-const RECONNECTING_PHASE: ConnectionPhase = {
-  kind: 'reconnecting',
-  instanceId: 'a',
-  lastTarget: TARGET,
-  cause: 'transport-down',
-  since: 0,
-  transports: new Map(),
 };
 
 async function flushMicrotasks(): Promise<void> {
@@ -37,7 +25,7 @@ async function flushMicrotasks(): Promise<void> {
   await Promise.resolve();
 }
 
-describe('attachPersistence — persist on online/reconnecting', () => {
+describe('attachPersistence — persist on online', () => {
   it('writes target to storage when phase enters online', async () => {
     const storage = memoryStorageAdapter();
     const onPersist = vi.fn();
@@ -69,20 +57,6 @@ describe('attachPersistence — persist on online/reconnecting', () => {
     const parsed = JSON.parse((await storage.get('camera.ui:transport:target')) as string);
     expect(parsed.tokens).toEqual(newTokens);
   });
-
-  it('persists from reconnecting phase using lastTarget', async () => {
-    const storage = memoryStorageAdapter();
-    const kernel = createKernel({ context: makeCtx(), initial: RECONNECTING_PHASE });
-    attachPersistence({ kernel, storage });
-
-    const newTokens: Tokens = { access: 'at-3', refresh: 'rt-3' };
-    kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: newTokens });
-    await flushMicrotasks();
-
-    const parsed = JSON.parse((await storage.get('camera.ui:transport:target')) as string);
-    expect(parsed.endpoint).toEqual(LAN);
-    expect(parsed.tokens).toEqual(newTokens);
-  });
 });
 
 describe('attachPersistence — clear on logout, keep on offline', () => {
@@ -104,7 +78,7 @@ describe('attachPersistence — clear on logout, keep on offline', () => {
     const kernel = createKernel({ context: makeCtx(), initial: ONLINE_PHASE });
     attachPersistence({ kernel, storage });
 
-    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'expired' });
+    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'expired', transient: true });
     await flushMicrotasks();
 
     // phase is now offline — credentials should still be there for the next
@@ -288,7 +262,7 @@ describe('attachPersistence — peek()', () => {
     await flushMicrotasks();
 
     // Network drop → offline. Cache must survive for backoff USER_RETRY.
-    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'bad' });
+    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'bad', transient: true });
     await flushMicrotasks();
 
     expect(peek()).not.toBeNull();
@@ -354,5 +328,33 @@ describe('attachPersistence — seed()', () => {
 
     expect(peek()).toBeNull();
     expect(await storage.get('camera.ui:transport:target')).toBeNull();
+  });
+});
+
+describe('attachPersistence — pendingTokens during discovering', () => {
+  it('persists tokens refreshed mid-probe onto the cached endpoint', async () => {
+    const target: ConnectionTarget = { endpoint: { url: 'https://nvr.local', mode: 'direct-lan' }, tokens: { access: 'at-0', refresh: 'rt-0' } };
+    const kernel = createKernel({
+      context: { now: () => Date.now() },
+      initial: { kind: 'online', instanceId: 'a', target },
+    });
+    const storage = memoryStorageAdapter();
+    const persistence = attachPersistence({ kernel, storage, key: 'k' });
+    await persistence.seed(target);
+
+    // discovering is only reachable via offline now
+    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'net', transient: true });
+    kernel.dispatch({ type: 'USER_RETRY' });
+    expect(kernel.phase.kind).toBe('discovering');
+    kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: { access: 'at-1', refresh: 'rt-1' } });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const raw = await storage.get('k');
+    const parsed = JSON.parse(raw!);
+    expect(parsed.tokens.access).toBe('at-1');
+    expect(parsed.endpoint.url).toBe('https://nvr.local');
+    expect(persistence.peek()?.tokens.access).toBe('at-1');
+    persistence.detach();
   });
 });

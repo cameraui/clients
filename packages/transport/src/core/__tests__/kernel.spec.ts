@@ -2,18 +2,13 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { createKernel } from '../kernel.js';
 
-import type { ConnectionPhase, Endpoint, ReducerContext, Tokens, TransportSpec } from '../types.js';
+import type { ConnectionPhase, Endpoint, ReducerContext, Tokens } from '../types.js';
 
 const LAN: Endpoint = { url: 'https://192.168.1.10:3443', mode: 'direct-lan' };
 const TOKENS: Tokens = { access: 'at' };
 
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([
-  ['http', { id: 'http', kind: 'request', phaseGating: false }],
-  ['socketio', { id: 'socketio', kind: 'persistent', phaseGating: true }],
-]);
-
 function makeContext(overrides: Partial<ReducerContext> = {}): ReducerContext {
-  return { specs: SPECS, now: () => 1000, ...overrides };
+  return { now: () => 1000, ...overrides };
 }
 
 describe('createKernel', () => {
@@ -27,7 +22,6 @@ describe('createKernel', () => {
       kind: 'online',
       instanceId: 'a',
       target: { endpoint: LAN, tokens: TOKENS },
-      transports: new Map(),
     };
     const k = createKernel({ context: makeContext(), initial });
     expect(k.phase).toBe(initial);

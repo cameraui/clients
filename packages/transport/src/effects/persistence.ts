@@ -107,8 +107,14 @@ export function attachPersistence(options: PersistenceOptions): Persistence {
 
   const unsub = options.kernel.subscribe((next, prev) => {
     if (detached) return;
-    const nextTarget = next.kind === 'online' ? next.target : next.kind === 'reconnecting' ? next.lastTarget : null;
-    const prevTarget = prev.kind === 'online' ? prev.target : prev.kind === 'reconnecting' ? prev.lastTarget : null;
+    // tokens rotated mid-probe: single-use refresh tokens make losing this
+    // write a forced logout on the next boot
+    if (next.kind === 'discovering' && next.pendingTokens && (prev.kind !== 'discovering' || prev.pendingTokens !== next.pendingTokens)) {
+      if (cached) persist({ endpoint: cached.endpoint, tokens: next.pendingTokens });
+      return;
+    }
+    const nextTarget = next.kind === 'online' ? next.target : null;
+    const prevTarget = prev.kind === 'online' ? prev.target : null;
 
     if (nextTarget && nextTarget !== prevTarget) {
       persist(nextTarget);

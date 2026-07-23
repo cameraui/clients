@@ -3,24 +3,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createKernel } from '../../core/kernel.js';
 import { attachBackoff } from '../backoff.js';
 
-import type { ConnectionPhase, Endpoint, ReducerContext, Tokens, TransportSpec } from '../../core/types.js';
+import type { ConnectionPhase, Endpoint, ReducerContext, Tokens } from '../../core/types.js';
 
 const LAN: Endpoint = { url: 'https://nvr.local', mode: 'direct-lan' };
 const TOKENS: Tokens = { access: 'at' };
 const T0 = 1_000_000;
 
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([['http', { id: 'http', kind: 'request', phaseGating: false }]]);
-
-function makeCtx(schedule?: readonly number[]): ReducerContext {
-  // Align the reducer's nextRetryAt timing with attachBackoff's schedule
-  // so both sides agree on when to retry. Without this, attachBackoff
-  // takes max(scheduleDelay, phaseDelay) and the phase-derived 5s
-  // DEFAULT_BACKOFF_MS would dominate small test schedules like [1_000].
-  return {
-    specs: SPECS,
-    now: () => Date.now(),
-    retryBackoffMs: schedule ? (attempt) => schedule[Math.min(attempt - 1, schedule.length - 1)] ?? schedule[0]! : undefined,
-  };
+function makeCtx(): ReducerContext {
+  return { now: () => Date.now() };
 }
 
 function offlineWith(nextRetryAt = T0): ConnectionPhase {
@@ -66,7 +56,7 @@ describe('attachBackoff — basic schedule', () => {
 describe('attachBackoff — exponential / capped schedule', () => {
   it('uses successive delays for repeated offlines', () => {
     const schedule = [5_000, 10_000, 30_000];
-    const kernel = createKernel({ context: makeCtx(schedule) });
+    const kernel = createKernel({ context: makeCtx() });
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled });
 
@@ -87,21 +77,21 @@ describe('attachBackoff — exponential / capped schedule', () => {
   });
 
   it('caps at the last schedule entry for further attempts', () => {
-    const schedule = [1_000, 2_000];
-    const kernel = createKernel({ context: makeCtx(schedule) });
+    const schedule = [5_000, 8_000];
+    const kernel = createKernel({ context: makeCtx() });
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled });
 
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    vi.advanceTimersByTime(1_001);
+    vi.advanceTimersByTime(5_001);
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    vi.advanceTimersByTime(2_001);
+    vi.advanceTimersByTime(8_001);
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    vi.advanceTimersByTime(2_001);
+    vi.advanceTimersByTime(8_001);
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
 
-    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([1_000, 2_000, 2_000, 2_000]);
+    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([5_000, 8_000, 8_000, 8_000]);
   });
 });
 
@@ -120,17 +110,17 @@ describe('attachBackoff — cancel + reset', () => {
   });
 
   it('resets the attempt counter on online', () => {
-    const schedule = [1_000, 5_000];
-    const kernel = createKernel({ context: makeCtx(schedule) });
+    const schedule = [5_000, 10_000];
+    const kernel = createKernel({ context: makeCtx() });
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled });
 
     // Climb to attempt 2 (USER_RETRY auto-fires after timer)
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    vi.advanceTimersByTime(1_001); // fires USER_RETRY → discovering
+    vi.advanceTimersByTime(5_001); // fires USER_RETRY → discovering
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([1_000, 5_000]);
+    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([5_000, 10_000]);
 
     // Succeed: USER_RETRY back to discovering, then PROBE_SUCCEEDED → online
     kernel.dispatch({ type: 'USER_RETRY' });
@@ -144,34 +134,34 @@ describe('attachBackoff — cancel + reset', () => {
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
     expect(kernel.phase.kind).toBe('offline');
-    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([1_000, 5_000, 1_000]);
+    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([5_000, 10_000, 5_000]);
   });
 
   it('resets the attempt counter on idle (logout)', () => {
-    const schedule = [1_000, 5_000];
-    const kernel = createKernel({ context: makeCtx(schedule) });
+    const schedule = [5_000, 10_000];
+    const kernel = createKernel({ context: makeCtx() });
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled });
 
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    vi.advanceTimersByTime(1_001);
+    vi.advanceTimersByTime(5_001);
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([1_000, 5_000]);
+    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([5_000, 10_000]);
 
     kernel.dispatch({ type: 'RESET' });
     expect(kernel.phase.kind).toBe('idle');
 
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([1_000, 5_000, 1_000]);
+    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([5_000, 10_000, 5_000]);
   });
 });
 
 describe('attachBackoff — BACKOFF_HINT', () => {
   it('extends the wait when a server hint pushes nextRetryAt further out', () => {
     const schedule = [5_000];
-    const kernel = createKernel({ context: makeCtx(schedule) });
+    const kernel = createKernel({ context: makeCtx() });
     const onScheduled = vi.fn();
     const onHintApplied = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled, onHintApplied });
@@ -201,7 +191,7 @@ describe('attachBackoff — BACKOFF_HINT', () => {
 
   it('keeps the longer wait when the hint is shorter than the local schedule', () => {
     const schedule = [60_000];
-    const kernel = createKernel({ context: makeCtx(schedule) });
+    const kernel = createKernel({ context: makeCtx() });
     const onScheduled = vi.fn();
     const onHintApplied = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled, onHintApplied });
@@ -220,7 +210,7 @@ describe('attachBackoff — BACKOFF_HINT', () => {
   });
 
   it('records the hint in phase.backoffHint for UI consumption', () => {
-    const kernel = createKernel({ context: makeCtx([5_000]) });
+    const kernel = createKernel({ context: makeCtx() });
     attachBackoff({ kernel, schedule: [5_000] });
 
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
@@ -269,7 +259,7 @@ describe('attachBackoff — detach', () => {
 
 describe('attachBackoff — firstAttemptDelayMs', () => {
   it('shortens only the first attempt', () => {
-    const kernel = createKernel({ context: makeCtx([1_500, 5_000]), initial: offlineWith() });
+    const kernel = createKernel({ context: makeCtx(), initial: offlineWith() });
     const onScheduled = vi.fn();
     const dispatchSpy = vi.spyOn(kernel, 'dispatch');
     attachBackoff({ kernel, schedule: [5_000, 5_000], firstAttemptDelayMs: () => 1_500, onScheduled });
@@ -284,21 +274,21 @@ describe('attachBackoff — firstAttemptDelayMs', () => {
   });
 
   it('cannot extend the schedule', () => {
-    const kernel = createKernel({ context: makeCtx([1_000]), initial: offlineWith() });
+    const kernel = createKernel({ context: makeCtx(), initial: offlineWith() });
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule: [1_000], firstAttemptDelayMs: () => 60_000, onScheduled });
     expect(onScheduled).toHaveBeenCalledWith(1, 1_000);
   });
 
   it('never undercuts a server backoff hint', () => {
-    const kernel = createKernel({ context: makeCtx([1_500]), initial: offlineWith(T0 + 30_000) });
+    const kernel = createKernel({ context: makeCtx(), initial: offlineWith(T0 + 30_000) });
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => 1_500, onScheduled });
     expect(onScheduled).toHaveBeenCalledWith(1, 30_000);
   });
 
   it('falls back to the schedule when the hook returns null', () => {
-    const kernel = createKernel({ context: makeCtx([5_000]), initial: offlineWith() });
+    const kernel = createKernel({ context: makeCtx(), initial: offlineWith() });
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => null, onScheduled });
     expect(onScheduled).toHaveBeenCalledWith(1, 5_000);

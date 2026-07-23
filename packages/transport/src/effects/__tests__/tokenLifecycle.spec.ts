@@ -4,18 +4,13 @@ import { createKernel } from '../../core/kernel.js';
 import { FakeTransport } from '../../testing/fakeTransport.js';
 import { attachTokenLifecycle } from '../tokenLifecycle.js';
 
-import type { ConnectionPhase, Endpoint, ReducerContext, Tokens, TransportSpec } from '../../core/types.js';
+import type { ConnectionPhase, Endpoint, ReducerContext, Tokens } from '../../core/types.js';
 
 const LAN: Endpoint = { url: 'https://nvr.local', mode: 'direct-lan' };
 const T0 = 1_000_000;
 
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([
-  ['http', { id: 'http', kind: 'request', phaseGating: false }],
-  ['socketio', { id: 'socketio', kind: 'persistent', phaseGating: true }],
-]);
-
 function makeCtx(): ReducerContext {
-  return { specs: SPECS, now: () => Date.now() };
+  return { now: () => Date.now() };
 }
 
 function onlineWith(expiresAt: number): ConnectionPhase {
@@ -26,7 +21,6 @@ function onlineWith(expiresAt: number): ConnectionPhase {
       endpoint: LAN,
       tokens: { access: 'at-0', refresh: 'rt-0', accessExpiresAt: expiresAt },
     },
-    transports: new Map(),
   };
 }
 
@@ -377,7 +371,7 @@ describe('attachTokenLifecycle — wake (visibility-resume hook)', () => {
     expect(refresh).not.toHaveBeenCalled();
   });
 
-  it('is a no-op when phase is not online/reconnecting', async () => {
+  it('is a no-op when phase is not online', async () => {
     // Default kernel is idle.
     const kernel = createKernel({ context: makeCtx() });
     const refresh = vi.fn();
@@ -387,28 +381,6 @@ describe('attachTokenLifecycle — wake (visibility-resume hook)', () => {
     await flushMicrotasks();
 
     expect(refresh).not.toHaveBeenCalled();
-  });
-
-  it('also fires in reconnecting phase (mid-outage resume)', async () => {
-    const kernel = createKernel({
-      context: makeCtx(),
-      initial: {
-        kind: 'reconnecting',
-        instanceId: 'a',
-        lastTarget: { endpoint: LAN, tokens: { access: 'at-0', accessExpiresAt: T0 + 30_000 } },
-        cause: 'transport-down',
-        since: T0,
-        transports: new Map(),
-      },
-    });
-    const refresh = vi.fn().mockResolvedValue({ access: 'at-1', accessExpiresAt: T0 + 90_000 } satisfies Tokens);
-    const lc = attachTokenLifecycle({ kernel, transports: [], refresh, graceMs: 5_000 });
-
-    vi.setSystemTime(T0 + 28_000);
-    lc.wake();
-    await flushMicrotasks();
-
-    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it('is a no-op after detach', async () => {

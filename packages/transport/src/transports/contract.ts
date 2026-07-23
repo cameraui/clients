@@ -16,6 +16,7 @@ export interface Transport {
   readonly spec: TransportSpec;
   apply(target: ConnectionTarget | null): Promise<void>;
   health(): TransportStatus;
+  ensureAlive?(): Promise<TransportStatus>;
   on<E extends TransportEvent>(event: E, handler: TransportEventHandler<E>): Unsubscribe;
   dispose(): Promise<void>;
 }
@@ -37,12 +38,6 @@ export function isEndpointChange(a: ConnectionTarget | null, b: ConnectionTarget
   if (a === b) return false;
   if (!a || !b) return true;
   return a.endpoint.url !== b.endpoint.url || a.endpoint.mode !== b.endpoint.mode;
-}
-
-export function isTokenOnlyChange(a: ConnectionTarget | null, b: ConnectionTarget | null): boolean {
-  if (!a || !b) return false;
-  if (isEndpointChange(a, b)) return false;
-  return !isSameTarget(a, b);
 }
 
 export class TransportEmitter {

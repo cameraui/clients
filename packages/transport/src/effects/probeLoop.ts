@@ -30,9 +30,11 @@ export interface ProbeContext {
 
 export interface ProbeLoopOptions {
   readonly kernel: Kernel;
+  readonly preferGraceMs?: number;
   readonly discover: (signal: AbortSignal) => Promise<readonly Endpoint[]>;
   readonly probe: (ctx: ProbeContext) => Promise<Tokens>;
   readonly timeoutByMode?: TimeoutByModeFn;
+  readonly prefer?: (endpoint: Endpoint) => boolean;
   readonly onDiscoverStart?: () => void;
   readonly onDiscoverSuccess?: (pool: readonly Endpoint[]) => void;
   readonly onDiscoverError?: (err: unknown) => void;
@@ -114,6 +116,8 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
       const { endpoint, value: tokens } = await raceFirst(candidates, {
         timeoutByMode: options.timeoutByMode,
         parentSignal: ctrl.signal,
+        prefer: options.prefer,
+        preferGraceMs: options.preferGraceMs,
         // needs-auth/fatal short-circuit because the same tokens (or lack
         // thereof) reject every endpoint in this pool. `aborted` short-
         // circuits because external cancellation (browser navigation, SW)

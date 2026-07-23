@@ -44,7 +44,7 @@ export function attachCrossTab(options: CrossTabOptions): Detach {
       // cached copy so a later retry doesn't probe with revoked tokens.
       options.absorb?.(null);
       const k = options.kernel.phase.kind;
-      if (k !== 'online' && k !== 'reconnecting') return;
+      if (k !== 'online') return;
       options.kernel.dispatch({ type: 'RESET' });
       options.onResetReceived?.();
       return;
@@ -62,7 +62,7 @@ export function attachCrossTab(options: CrossTabOptions): Detach {
     if (!parsed?.tokens?.access) return;
 
     const k = options.kernel.phase.kind;
-    if (k !== 'online' && k !== 'reconnecting') {
+    if (k !== 'online') {
       if (parsed.endpoint?.url) {
         options.absorb?.({ endpoint: parsed.endpoint, tokens: parsed.tokens });
         // Still notify — the app may want to retry from needs-auth/idle now

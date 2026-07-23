@@ -89,10 +89,7 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
     }
 
     const phase = options.kernel.phase;
-    // Allow refresh both in 'online' (proactive / auth-error from a still-up
-    // transport) and 'reconnecting' (transports retrying with stale tokens —
-    // refreshing here lets the next natural reconnect use fresh tokens).
-    const target = phase.kind === 'online' ? phase.target : phase.kind === 'reconnecting' ? phase.lastTarget : null;
+    const target = phase.kind === 'online' ? phase.target : null;
     if (!target) {
       options.onTriggerSkipped?.(reason, 'no-target', phase.kind);
       return;
@@ -125,7 +122,7 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
         // (`fresh`) beats the pre-lock snapshot, the live phase beats the
         // captured one.
         const livePhase = options.kernel.phase;
-        const liveTarget = livePhase.kind === 'online' ? livePhase.target : livePhase.kind === 'reconnecting' ? livePhase.lastTarget : null;
+        const liveTarget = livePhase.kind === 'online' ? livePhase.target : null;
         const base = liveTarget ?? target;
         const refreshTarget: ConnectionTarget = fresh ? { ...base, tokens: fresh } : base;
         const tokens = await options.refresh(refreshTarget, reason);
@@ -186,10 +183,6 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
         transientRetries = 0;
         schedule(next.target);
       }
-    } else if (next.kind === 'reconnecting') {
-      // Keep any in-flight refresh / retry timer running — phase-flip alone is
-      // not a reason to drop the refresh effort. The next retry will pick up
-      // phase.lastTarget instead of phase.target.
     } else {
       cancelTimer();
       transientRetries = 0;
@@ -217,7 +210,7 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
   function wake(): void {
     if (detached) return;
     const phase = options.kernel.phase;
-    const target = phase.kind === 'online' ? phase.target : phase.kind === 'reconnecting' ? phase.lastTarget : null;
+    const target = phase.kind === 'online' ? phase.target : null;
     if (!target) {
       options.onWakeChecked?.({ decision: 'no-target', phase: phase.kind });
       return;

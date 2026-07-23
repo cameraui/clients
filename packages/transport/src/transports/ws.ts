@@ -1,3 +1,4 @@
+import { classifyClose } from './closeCodes.js';
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
 
 import type { Logger } from '@camera.ui/logger';
@@ -108,10 +109,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
   }
 
   function isAuthCloseEvent(event: CloseEvent): boolean {
-    if (event.code === 1008 || event.code === 4401) return true;
-    if (!event.reason) return false;
-    const lower = event.reason.toLowerCase();
-    return lower.includes('unauthorized') || lower.includes('forbidden') || lower.includes('401') || lower.includes('403');
+    return classifyClose({ code: event.code, reason: event.reason }) === 'auth-expired';
   }
 
   function bindWs(handle: InternalHandle, ws: WebSocket): void {

@@ -12,6 +12,7 @@ export type Unsubscribe = () => void;
 export interface KernelOptions {
   readonly context: ReducerContext;
   readonly initial?: ConnectionPhase;
+  readonly onAction?: (action: Action, prev: ConnectionPhase, next: ConnectionPhase) => void;
 }
 
 export interface Kernel {
@@ -40,6 +41,13 @@ export function createKernel(options: KernelOptions): Kernel {
       while (next) {
         const prev = current;
         const after = reducer(prev, next, options.context);
+        if (options.onAction) {
+          try {
+            options.onAction(next, prev, after);
+          } catch (err) {
+            log.warn('onAction threw on', next.type, err);
+          }
+        }
         if (after !== prev) {
           current = after;
           // Snapshot + per-listener try/catch: a throw in one subscriber must

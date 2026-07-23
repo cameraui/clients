@@ -179,3 +179,84 @@ describe('raceFirst — per-mode timeout', () => {
     await assertion;
   });
 });
+
+describe('raceFirst — LAN preference', () => {
+  const LAN_EP: Endpoint = { url: 'https://lan.local', mode: 'direct-lan' };
+  const WAN_EP: Endpoint = { url: 'https://wan.example', mode: 'direct-wan' };
+
+  function candidate(endpoint: Endpoint, result: 'ok' | 'fail', delayMs: number): RaceCandidate<string> {
+    return {
+      endpoint,
+      run: (signal) =>
+        new Promise((resolve, reject) => {
+          const t = setTimeout(() => (result === 'ok' ? resolve(endpoint.url) : reject(new Error('nope'))), delayMs);
+          signal.addEventListener('abort', () => {
+            clearTimeout(t);
+            reject(new Error('aborted'));
+          });
+        }),
+    };
+  }
+
+  const prefer = (ep: Endpoint): boolean => ep.mode === 'direct-lan';
+
+  it('holds a WAN success while LAN is pending and commits LAN when it succeeds within grace', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = raceFirst([candidate(WAN_EP, 'ok', 10), candidate(LAN_EP, 'ok', 100)], { prefer, preferGraceMs: 400 });
+      await vi.advanceTimersByTimeAsync(150);
+      const result = await p;
+      expect(result.endpoint).toBe(LAN_EP);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('commits the held WAN success when the grace window expires', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = raceFirst([candidate(WAN_EP, 'ok', 10), candidate(LAN_EP, 'ok', 1_500)], { prefer, preferGraceMs: 400 });
+      await vi.advanceTimersByTimeAsync(450);
+      const result = await p;
+      expect(result.endpoint).toBe(WAN_EP);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('commits the held WAN success immediately once every LAN candidate failed', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = raceFirst([candidate(WAN_EP, 'ok', 10), candidate(LAN_EP, 'fail', 30)], { prefer, preferGraceMs: 5_000 });
+      await vi.advanceTimersByTimeAsync(50);
+      const result = await p;
+      expect(result.endpoint).toBe(WAN_EP);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a preferred success commits immediately without grace', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = raceFirst([candidate(WAN_EP, 'ok', 100), candidate(LAN_EP, 'ok', 10)], { prefer, preferGraceMs: 400 });
+      await vi.advanceTimersByTimeAsync(20);
+      const result = await p;
+      expect(result.endpoint).toBe(LAN_EP);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('without preferred candidates a WAN success commits immediately', async () => {
+    vi.useFakeTimers();
+    try {
+      const p = raceFirst([candidate(WAN_EP, 'ok', 10)], { prefer, preferGraceMs: 5_000 });
+      await vi.advanceTimersByTimeAsync(20);
+      const result = await p;
+      expect(result.endpoint).toBe(WAN_EP);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

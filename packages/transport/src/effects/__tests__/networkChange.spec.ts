@@ -3,12 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { createKernel } from '../../core/kernel.js';
 import { attachNetworkChange } from '../networkChange.js';
 
-import type { ReducerContext, TransportSpec } from '../../core/types.js';
-
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([['http', { id: 'http', kind: 'request', phaseGating: false }]]);
+import type { ReducerContext } from '../../core/types.js';
 
 function makeCtx(): ReducerContext {
-  return { specs: SPECS, now: () => Date.now() };
+  return { now: () => Date.now() };
 }
 
 describe('attachNetworkChange', () => {

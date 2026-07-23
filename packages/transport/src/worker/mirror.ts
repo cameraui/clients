@@ -61,7 +61,6 @@ export function createWorkerKernelMirror(options: WorkerKernelMirrorOptions): Wo
 
   function targetOf(p: ConnectionPhase): ConnectionTarget | null {
     if (p.kind === 'online') return p.target;
-    if (p.kind === 'reconnecting') return p.lastTarget;
     return null;
   }
 

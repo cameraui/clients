@@ -3,14 +3,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { createKernel } from '../../core/kernel.js';
 import { attachPresence } from '../presence.js';
 
-import type { ConnectionPhase, Endpoint, ReducerContext, TransportSpec } from '../../core/types.js';
+import type { ConnectionPhase, Endpoint, ReducerContext } from '../../core/types.js';
 
 const LAN: Endpoint = { url: 'https://nvr.local', mode: 'direct-lan' };
 
-const SPECS: ReadonlyMap<string, TransportSpec> = new Map([['http', { id: 'http', kind: 'request', phaseGating: false }]]);
-
 function makeCtx(): ReducerContext {
-  return { specs: SPECS, now: () => Date.now() };
+  return { now: () => Date.now() };
 }
 
 function offlinePhase(): ConnectionPhase {
@@ -36,7 +34,7 @@ describe('attachPresence — network events', () => {
   it('defaults onOnline: no-op when phase is online', () => {
     const kernel = createKernel({
       context: makeCtx(),
-      initial: { kind: 'online', instanceId: 'a', target: { endpoint: LAN, tokens: { access: 'x' } }, transports: new Map() },
+      initial: { kind: 'online', instanceId: 'a', target: { endpoint: LAN, tokens: { access: 'x' } } },
     });
     const win = new EventTarget();
     const dispatchSpy = vi.spyOn(kernel, 'dispatch');
