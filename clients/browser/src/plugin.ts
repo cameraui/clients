@@ -24,10 +24,14 @@ function isContext(input: CameraUiContext | CameraUiPluginInput): input is Camer
   return 'rpc' in input && 'isConnected' in input;
 }
 
+const DOWN_DEBOUNCE_MS = 4_000;
+
 function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
   const { natsTransport, target, wsTransport } = input;
 
   let hasBeenConnected = natsTransport.getClient() !== null;
+  let lastClient: RPCClient | null = natsTransport.getClient();
+  let downTimer: ReturnType<typeof setTimeout> | null = null;
 
   const rpc = shallowRef<RPCClient | undefined>(natsTransport.getClient() ?? undefined);
   const isConnected = ref(natsTransport.getClient()?.isConnected ?? false);
@@ -69,26 +73,37 @@ function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
   }
 
   natsTransport.subscribeClient((next) => {
-    const wasConnected = isConnected.value;
     if (next) {
+      if (downTimer !== null) {
+        clearTimeout(downTimer);
+        downTimer = null;
+      }
+      const wasConnected = isConnected.value;
+      const clientChanged = next !== lastClient;
+      lastClient = next;
       rpc.value = next;
       isConnected.value = true;
       error.value = undefined;
-      if (!wasConnected) {
+      // a blip shorter than the debounce with the SAME client needs no refresh
+      // (the nats lib re-issues its subscriptions itself) — a new client always
+      // does, its server-side state is connId-fresh
+      if (!wasConnected || clientChanged) {
         refreshClientSubscriptions();
         if (hasBeenConnected) emit('reconnected');
         hasBeenConnected = true;
       }
     } else {
       rpc.value = undefined;
-      isConnected.value = false;
-      if (wasConnected) {
+      if (downTimer !== null || !isConnected.value) return;
+      downTimer = setTimeout(() => {
+        downTimer = null;
+        isConnected.value = false;
         // No wipe — NATS drop is a transient transport event, the cached data
         // (snapshots, events, etc.) is still valid for the next reconnect.
         // resetClientState() is reserved for identity-level changes (instance
         // switch, logout).
         emit('disconnected');
-      }
+      }, DOWN_DEBOUNCE_MS);
     }
   });
 
