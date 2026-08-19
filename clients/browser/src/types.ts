@@ -17,7 +17,7 @@ export interface BaseLogger {
   attention: (...args: unknown[]) => void;
 }
 
-export type CameraUiEventType = 'reconnected' | 'disconnected' | 'visibility-resumed';
+export type CameraUiEventType = 'reconnected' | 'disconnected';
 
 export type CameraUiEventCallback = () => void;
 
