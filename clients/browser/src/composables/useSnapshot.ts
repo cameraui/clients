@@ -86,7 +86,8 @@ export function clearSnapshotCache(): void {
 }
 
 export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>): UseSnapshotReturn {
-  const { isConnected } = useCameraUi();
+  const cameraUi = useCameraUi();
+  const { isConnected } = cameraUi;
   const deviceManager = useDeviceManager();
 
   const snapshot = shallowRef<ArrayBuffer | undefined>();
@@ -159,10 +160,10 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     }
   }
 
-  async function loadSnapshot(id: string): Promise<void> {
+  async function loadSnapshot(id: string, skipCache = false): Promise<void> {
     if (!isConnected.value || !id) return;
 
-    const cached = snapshotCache.get(id);
+    const cached = skipCache ? undefined : snapshotCache.get(id);
     if (cached) {
       snapshot.value = cached;
       initialLoadDone.value = true;
@@ -253,7 +254,17 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     { immediate: true },
   );
 
+  const onReconnected = (): void => {
+    const idOrName = toValue(cameraIdOrName);
+    if (isCameraDisabled(idOrName)) return;
+    const id = typeof idOrName === 'string' ? idOrName : idOrName._id;
+    if (id) loadSnapshot(id, true);
+  };
+
+  cameraUi.on('reconnected', onReconnected);
+
   tryOnScopeDispose(() => {
+    cameraUi.off('reconnected', onReconnected);
     unsubscribe?.();
     releaseHeldDevice();
   });
