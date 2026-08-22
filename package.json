@@ -30,10 +30,10 @@
   "author": "seydx",
   "devDependencies": {
     "@types/node": "^26.2.0",
-    "@vue/language-core": "^3.3.10",
+    "@vue/language-core": "^3.3.11",
     "tsx": "^4.23.12",
     "typescript": "5.9.3",
-    "updates": "^18.0.4"
+    "updates": "^18.0.5"
   },
   "overrides": {
     "@vue/language-core": "$@vue/language-core"

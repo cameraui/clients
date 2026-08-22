@@ -42,8 +42,8 @@
     "typescript": "5.9.3",
     "typescript-eslint": "^8.67.0",
     "unplugin-dts": "^1.0.3",
-    "updates": "^18.0.3",
-    "vite": "^8.2.1",
+    "updates": "^18.0.5",
+    "vite": "^8.2.2",
     "vitest": "^4.1.11"
   },
   "bugs": {
