@@ -56,7 +56,6 @@ export class StreamConnection implements ReactiveStream {
   private readonly containerElement: ComputedRef<HTMLElement | undefined | null>;
   private readonly target: Readonly<Ref<ConnectionTarget | null>>;
   private readonly isReady: ComputedRef<boolean>;
-  private readonly effectiveMode: ComputedRef<Exclude<VideoStreamingMode, 'auto'>>;
   private readonly triedSourceIds = new Set<string>();
   private readonly options: StreamConnectionOptions;
   private readonly wsTransport: WsTransport;
@@ -125,12 +124,6 @@ export class StreamConnection implements ReactiveStream {
     this.videoElement = computed(() => toValue(options.videoElement));
     this.containerElement = computed(() => toValue(options.containerElement));
     this.isReady = computed(() => !!this.camera.value && !!this.videoElement.value && !!this.target.value);
-    this.effectiveMode = computed(() => {
-      if (this.requestedMode.value === 'auto') {
-        return this.activeMode.value;
-      }
-      return this.requestedMode.value;
-    });
 
     this.scope.run(() => {
       const { onTabPaused, onTabVisible } = useTabVisibility();
@@ -164,7 +157,7 @@ export class StreamConnection implements ReactiveStream {
               this.markSourceUndecodable();
               this.restart();
             }
-          } else if (this.status.value === 'connected' && !this.isPlaying.value && !this.abortController.signal.aborted && this.sourceLikelyH265()) {
+          } else if (this.status.value === 'connected' && !this.isPlaying.value && !this.abortController.signal.aborted) {
             this.handleNoFramesWhileConnected();
           }
         },
@@ -755,7 +748,19 @@ export class StreamConnection implements ReactiveStream {
   }
 
   private handleNoFramesWhileConnected(): void {
-    reportH265DecodeFailure(this.activeMode.value === 'mse' ? 'mse' : 'webrtc');
+    if (this.sourceLikelyH265()) {
+      reportH265DecodeFailure(this.activeMode.value === 'mse' ? 'mse' : 'webrtc');
+    }
+
+    if (this.requestedMode.value === 'auto' && this.activeMode.value !== 'mse') {
+      this.webrtcHandler?.close();
+      this.webrtcHandler = undefined;
+      this.activeMode.value = 'mse';
+      this.status.value = 'reconnecting';
+      this.startMSE();
+      return;
+    }
+
     this.markSourceUndecodable();
     this.restart();
   }
@@ -831,14 +836,14 @@ export class StreamConnection implements ReactiveStream {
     this.stopWsConnectTimeout();
     this.status.value = 'connecting';
 
-    const mode = this.effectiveMode.value;
+    const mode = this.requestedMode.value;
 
-    if (mode === 'webrtc' || mode === 'webrtc/tcp') {
+    if (mode === 'auto') {
+      this.startAutoMode();
+    } else if (mode === 'webrtc' || mode === 'webrtc/tcp') {
       this.startWebRTC(mode);
     } else if (mode === 'mse') {
       this.startMSE();
-    } else if (this.requestedMode.value === 'auto') {
-      this.startAutoMode();
     }
   }
 
@@ -918,6 +923,13 @@ export class StreamConnection implements ReactiveStream {
 
     const video = this.videoElement.value;
     if (!video) return;
+
+    // go2rtc answers audio-only when it cannot deliver the video codec —
+    // switching to that stream would freeze the picture with no way back
+    if (this.hasVideo.value && stream.getVideoTracks().length === 0) {
+      this.handleWebRTCFailed();
+      return;
+    }
 
     // connectTimeout keeps running as a first-frame watchdog (a connected
     // H.265 track can still decode to nothing) — handleFirstFrame stops it
