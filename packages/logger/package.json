@@ -42,7 +42,7 @@
     "typescript": "5.9.3",
     "typescript-eslint": "^8.68.0",
     "unplugin-dts": "^1.0.3",
-    "updates": "^18.0.6",
+    "updates": "^18.0.7",
     "vite": "^8.2.2",
     "vitest": "^4.1.11"
   },
