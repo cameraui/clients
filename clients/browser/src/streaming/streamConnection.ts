@@ -946,13 +946,12 @@ export class StreamConnection implements ReactiveStream {
     this.handleFirstFrameWebRTC(stream);
 
     if (this.requestedMode.value === 'auto' && this.mseHandler) {
-      // Client-side close only: go2rtc has no per-consumer stop message, and
-      // the WS must stay open for signaling (candidates, backchannel), so the
-      // server keeps pushing fMP4 for this session — the binary frames are
-      // dropped in handleWsMessage. Known bandwidth cost of auto mode.
+      // the WS stays open for signaling and talkback, so go2rtc has to be told
+      // to drop the fMP4 consumer, otherwise it keeps pushing frames nobody reads
       this.mseHandler.close();
       this.mseHandler = undefined;
       this.stopMseConnectTimeout();
+      this.sendWsMessage({ type: 'mse/stop' });
     }
   }
 
