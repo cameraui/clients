@@ -12,6 +12,12 @@ interface FsState {
 }
 
 const fsRegistry = new WeakMap<HTMLElement, FsState>();
+let fullscreenRoot: HTMLElement | null = null;
+
+export function setFullscreenRoot(el: HTMLElement | null): void {
+  fullscreenRoot = el;
+}
+
 const fullscreenStack: HTMLElement[] = [];
 const topmostFullscreenWrapper = shallowRef<HTMLElement | null>(null);
 
@@ -75,7 +81,7 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
     fsRegistry.set(el, state);
 
     el.setAttribute('data-cui-fullscreen', mode);
-    document.body.appendChild(wrapper);
+    (fullscreenRoot ?? document.body).appendChild(wrapper);
     wrapper.appendChild(el);
 
     // Stop the body underneath from scrolling/bouncing. The wrapper itself
