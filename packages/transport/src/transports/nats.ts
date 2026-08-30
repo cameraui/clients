@@ -15,6 +15,8 @@ const NATS_SPEC: TransportSpec = {
   phaseGating: true,
 };
 
+const RESOLVE_RETRY_MIN_MS = 3_000;
+
 export interface ResolveServersContext {
   readonly target: ConnectionTarget;
   readonly connId: string;
@@ -92,6 +94,8 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   let connId: string | null = null;
   let applyEpoch = 0;
   let pendingConnectAbort: AbortController | null = null;
+  let poolRefreshAt = 0;
+  let poolRefreshing = false;
 
   function buildServers(target: ConnectionTarget): string[] {
     const url = new URL(target.endpoint.url);
@@ -113,11 +117,16 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   async function refreshPool(p: RPCClient): Promise<void> {
     const target = currentTarget;
     if (!resolveServers || !target || disposed) return;
+    if (poolRefreshing || Date.now() - poolRefreshAt < RESOLVE_RETRY_MIN_MS) return;
+    poolRefreshing = true;
     try {
       const servers = await serversFor(target);
       if (proxy === p && !disposed) p.setServers(servers);
     } catch (err) {
       logger?.warn(`server refresh failed: ${stringifyError(err)}`);
+    } finally {
+      poolRefreshing = false;
+      poolRefreshAt = Date.now();
     }
   }
 
@@ -131,7 +140,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   function startRefresh(p: RPCClient): void {
     stopRefresh();
     if (!resolveServers || resolveRefreshMs <= 0) return;
-    refreshTimer = setInterval(() => void refreshPool(p), resolveRefreshMs);
+    refreshTimer = setInterval(() => refreshPool(p), resolveRefreshMs);
   }
 
   async function resign(reason: string): Promise<void> {
@@ -210,7 +219,10 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
           case 'disconnect':
             markDown('disconnect');
             notifyClient();
-            if (resolveServers) void refreshPool(p);
+            if (resolveServers) refreshPool(p);
+            break;
+          case 'reconnecting':
+            if (resolveServers) refreshPool(p);
             break;
           case 'staleConnection':
             // Heartbeat detected silent failure. Library should follow up with
@@ -240,7 +252,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     const cls = classifyClose(typeof event.data === 'object' && event.data !== null ? { ...(event.data as object), message } : message);
     if (cls === 'auth-expired') {
       if (resolveServers) {
-        void resign(message);
+        resign(message);
         return;
       }
       emitter.emit('auth-error', { message });

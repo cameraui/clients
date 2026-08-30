@@ -8,6 +8,8 @@ import type { Socket } from 'socket.io-client';
 import type { ConnectionTarget, TransportSpec, TransportStatus } from '../core/types.js';
 import type { Transport, TransportEvent, TransportEventHandler, Unsubscribe } from './contract.js';
 
+const RESOLVE_RETRY_MIN_MS = 3_000;
+
 export type { Socket };
 
 const SOCKETIO_SPEC: TransportSpec = {
@@ -64,6 +66,8 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   let currentTarget: ConnectionTarget | null = null;
   let currentQuery: Record<string, string> = {};
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
+  let queryRefreshAt = 0;
+  let queryRefreshing = false;
   let status: TransportStatus = { up: false };
   let disposed = false;
 
@@ -100,6 +104,8 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   async function refreshQuery(): Promise<void> {
     const target = currentTarget;
     if (!resolveQuery || !target || disposed) return;
+    if (queryRefreshing || Date.now() - queryRefreshAt < RESOLVE_RETRY_MIN_MS) return;
+    queryRefreshing = true;
     try {
       const query = await queryFor(target);
       if (currentTarget !== target || disposed) return;
@@ -107,6 +113,9 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
       for (const sock of sockets.values()) sock.io.opts.query = query;
     } catch (err) {
       logger?.warn(`query refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      queryRefreshing = false;
+      queryRefreshAt = Date.now();
     }
   }
 
@@ -120,7 +129,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   function startRefresh(): void {
     stopRefresh();
     if (!resolveQuery || resolveRefreshMs <= 0) return;
-    refreshTimer = setInterval(() => void refreshQuery(), resolveRefreshMs);
+    refreshTimer = setInterval(() => refreshQuery(), resolveRefreshMs);
   }
 
   function markUp(): void {
@@ -145,11 +154,13 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     socket.on('connect', () => markUp());
     socket.on('disconnect', (reason: string) => {
       markDown(reason);
-      if (resolveQuery) void refreshQuery();
+      if (resolveQuery) refreshQuery();
     });
     socket.on('connect_error', (err: Error) => {
       const msg = err?.message ?? 'connect_error';
       logger?.debug(`connect_error (main): ${msg}`);
+      // a rejected upgrade is a bare websocket error here, a stale signed query is the usual cause
+      if (resolveQuery) refreshQuery();
       if (isAuthError(msg)) {
         emitter.emit('auth-error', { message: msg });
         return;
