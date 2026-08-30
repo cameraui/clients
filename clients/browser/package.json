@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@camera.ui/logger": "file:../../packages/logger",
-    "@camera.ui/rpc": "^1.0.11",
+    "@camera.ui/rpc": "^1.0.12",
     "@camera.ui/sdk": "~1.2.35",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.3.1",
