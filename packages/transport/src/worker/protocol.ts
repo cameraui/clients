@@ -4,6 +4,8 @@ export interface KernelSyncMessage {
   readonly type: 'kernel-sync';
   readonly generation: number;
   readonly phase: ConnectionPhase;
+  // the main thread answers kernel-resolve-request with signed server URLs
+  readonly resolver?: boolean;
 }
 
 export interface KernelSyncRequestMessage {
@@ -14,7 +16,21 @@ export interface KernelRevalidateMessage {
   readonly type: 'kernel-revalidate';
 }
 
-export type WorkerMessage = KernelSyncMessage | KernelSyncRequestMessage | KernelRevalidateMessage;
+export interface KernelResolveRequestMessage {
+  readonly type: 'kernel-resolve-request';
+  readonly id: number;
+  readonly connId: string;
+  readonly defaultServers: readonly string[];
+}
+
+export interface KernelResolveReplyMessage {
+  readonly type: 'kernel-resolve-reply';
+  readonly id: number;
+  readonly servers?: string[];
+  readonly error?: string;
+}
+
+export type WorkerMessage = KernelSyncMessage | KernelSyncRequestMessage | KernelRevalidateMessage | KernelResolveRequestMessage | KernelResolveReplyMessage;
 
 export interface MessageSource {
   postMessage(message: WorkerMessage): void;

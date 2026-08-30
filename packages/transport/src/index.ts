@@ -42,10 +42,18 @@ export type { PresenceCallback, PresenceOptions, VisibilitySource } from './effe
 export type { ProbeContext, ProbeFailure, ProbeFailureKind, ProbeLoopOptions } from './effects/probeLoop.js';
 export type { Detach, RefreshReason, TokenLifecycle, TokenLifecycleOptions } from './effects/tokenLifecycle.js';
 export type { TransportSyncOptions } from './effects/transportSync.js';
-export type { WorkerBridge, WorkerBridgeOptions } from './effects/workerBridge.js';
+export type { BridgeResolveContext, WorkerBridge, WorkerBridgeOptions } from './effects/workerBridge.js';
 export type { ConnectionJournal, JournalEntry, JournalOptions } from './journal.js';
 export type { RaceCandidate, RaceFirstOptions, RaceFirstResult, TimeoutByModeFn } from './race.js';
 export type { ConnectionSignal, ConnectionSignalHandle, ConnectionSignalOptions } from './signal.js';
 export type { CloseClass, CloseLike } from './transports/closeCodes.js';
 export type { PerResourceTransport, Transport, TransportEvent, TransportEventHandler, TransportEventPayload } from './transports/contract.js';
-export type { KernelSyncMessage, KernelSyncRequestMessage, MessageSource, WorkerHost, WorkerMessage } from './worker/protocol.js';
+export type {
+  KernelResolveReplyMessage,
+  KernelResolveRequestMessage,
+  KernelSyncMessage,
+  KernelSyncRequestMessage,
+  MessageSource,
+  WorkerHost,
+  WorkerMessage,
+} from './worker/protocol.js';

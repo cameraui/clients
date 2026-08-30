@@ -215,3 +215,49 @@ describe('createWorkerKernelMirror', () => {
     expect(b).not.toHaveBeenCalled();
   });
 });
+
+describe('createWorkerKernelMirror — resolveServers relay', () => {
+  it('posts a resolve request and settles on the reply', async () => {
+    const source = new FakeSource();
+    const mirror = createWorkerKernelMirror({ source });
+
+    const p = mirror.resolveServers({ connId: 'c-1', defaultServers: ['wss://a'] });
+    const req = source.sent[0];
+    expect(req).toEqual({ type: 'kernel-resolve-request', id: 1, connId: 'c-1', defaultServers: ['wss://a'] });
+
+    source.deliver({ type: 'kernel-resolve-reply', id: 1, servers: ['wss://signed'] });
+    await expect(p).resolves.toEqual(['wss://signed']);
+  });
+
+  it('rejects on an error reply and ignores unknown ids', async () => {
+    const source = new FakeSource();
+    const mirror = createWorkerKernelMirror({ source });
+
+    const p = mirror.resolveServers({ connId: 'c-1', defaultServers: [] });
+    source.deliver({ type: 'kernel-resolve-reply', id: 99, servers: ['wss://other'] });
+    source.deliver({ type: 'kernel-resolve-reply', id: 1, error: 'kernel offline' });
+    await expect(p).rejects.toThrow('kernel offline');
+  });
+
+  it('times out without a reply', async () => {
+    vi.useFakeTimers();
+    try {
+      const source = new FakeSource();
+      const mirror = createWorkerKernelMirror({ source, resolveTimeoutMs: 50 });
+      const p = mirror.resolveServers({ connId: 'c-1', defaultServers: [] });
+      const settled = expect(p).rejects.toThrow('resolve timeout');
+      await vi.advanceTimersByTimeAsync(60);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('dispose rejects pending resolves', async () => {
+    const source = new FakeSource();
+    const mirror = createWorkerKernelMirror({ source });
+    const p = mirror.resolveServers({ connId: 'c-1', defaultServers: [] });
+    mirror.dispose();
+    await expect(p).rejects.toThrow('mirror disposed');
+  });
+});

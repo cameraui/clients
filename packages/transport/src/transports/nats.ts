@@ -15,9 +15,18 @@ const NATS_SPEC: TransportSpec = {
   phaseGating: true,
 };
 
+export interface ResolveServersContext {
+  readonly target: ConnectionTarget;
+  readonly connId: string;
+  readonly defaultServers: readonly string[];
+}
+
+export type ServersResolver = (ctx: ResolveServersContext) => Promise<string[]>;
+
 export interface NatsTransportOptions {
   readonly spec?: Partial<TransportSpec>;
   readonly proxyPath?: string;
+  readonly resolveRefreshMs?: number;
   readonly clientName?: string;
   readonly natsUser?: string;
   readonly natsPassword?: string;
@@ -30,6 +39,7 @@ export interface NatsTransportOptions {
   readonly pingTimeout?: number;
   readonly maxPingOut?: number;
   readonly logger?: Logger;
+  readonly resolveServers?: ServersResolver;
 }
 
 export type NatsClientListener = (client: RPCClient | null) => void;
@@ -68,9 +78,12 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   const pingTimeout = options.pingTimeout ?? 20_000;
   const maxPingOut = options.maxPingOut ?? 1;
   const logger = options.logger;
+  const resolveServers = options.resolveServers;
+  const resolveRefreshMs = options.resolveRefreshMs ?? 0;
 
   const emitter = new TransportEmitter();
   const clientListeners = new Set<NatsClientListener>();
+  let refreshTimer: ReturnType<typeof setInterval> | null = null;
   let proxy: RPCClient | null = null;
   let currentTarget: ConnectionTarget | null = null;
   let status: TransportStatus = { up: false };
@@ -89,6 +102,58 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     if (target.tokens.proxySession) params.set('session', target.tokens.proxySession);
     if (connId) params.set('connId', connId);
     return [`${wsProtocol}//${url.hostname}:${port}${prefix}${proxyPath}?${params.toString()}`];
+  }
+
+  async function serversFor(target: ConnectionTarget): Promise<string[]> {
+    const defaultServers = buildServers(target);
+    if (!resolveServers) return defaultServers;
+    return resolveServers({ target, connId: connId ?? '', defaultServers });
+  }
+
+  async function refreshPool(p: RPCClient): Promise<void> {
+    const target = currentTarget;
+    if (!resolveServers || !target || disposed) return;
+    try {
+      const servers = await serversFor(target);
+      if (proxy === p && !disposed) p.setServers(servers);
+    } catch (err) {
+      logger?.warn(`server refresh failed: ${stringifyError(err)}`);
+    }
+  }
+
+  function stopRefresh(): void {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  }
+
+  function startRefresh(p: RPCClient): void {
+    stopRefresh();
+    if (!resolveServers || resolveRefreshMs <= 0) return;
+    refreshTimer = setInterval(() => void refreshPool(p), resolveRefreshMs);
+  }
+
+  async function resign(reason: string): Promise<void> {
+    const target = currentTarget;
+    if (!proxy || !target || disposed) return;
+    logger?.debug(`resign (${reason})`);
+    const epoch = ++applyEpoch;
+    stopStatusMonitor();
+    stopRefresh();
+    try {
+      proxy.abortClose();
+    } catch {
+      // ignore
+    }
+    proxy = null;
+    notifyClient();
+    markDown(`signature-expired: ${reason}`);
+    try {
+      await rebuildClient(target, epoch);
+    } catch {
+      // markDown happened inside, ensureAlive retries from the current target
+    }
   }
 
   function notifyClient(): void {
@@ -145,6 +210,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
           case 'disconnect':
             markDown('disconnect');
             notifyClient();
+            if (resolveServers) void refreshPool(p);
             break;
           case 'staleConnection':
             // Heartbeat detected silent failure. Library should follow up with
@@ -173,6 +239,10 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     }
     const cls = classifyClose(typeof event.data === 'object' && event.data !== null ? { ...(event.data as object), message } : message);
     if (cls === 'auth-expired') {
+      if (resolveServers) {
+        void resign(message);
+        return;
+      }
       emitter.emit('auth-error', { message });
       return;
     }
@@ -190,6 +260,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     logger?.debug(`rebuildClient start (epoch=${epoch})`);
     const t0 = Date.now();
     stopStatusMonitor();
+    stopRefresh();
     pendingConnectAbort?.abort();
     if (proxy) {
       try {
@@ -204,7 +275,17 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     // Fresh per-connection token BEFORE buildServers so the proxy URL and the
     // client's reply subjects carry the same connId.
     connId = newConnId();
-    const servers = buildServers(target);
+    let servers: string[];
+    try {
+      servers = await serversFor(target);
+    } catch (err) {
+      if (disposed || epoch !== applyEpoch) return;
+      const msg = stringifyError(err);
+      logger?.debug(`rebuildClient resolve FAILED: ${msg}`);
+      markDown(msg);
+      throw err;
+    }
+    if (disposed || epoch !== applyEpoch) return;
     const next = createRPCClient({
       servers,
       name: clientName,
@@ -242,8 +323,9 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       const msg = err instanceof Error ? err.message : String(err);
       logger?.debug(`rebuildClient connect FAILED after ${Date.now() - t0}ms: ${msg}`);
       // a 4401 at connect means the URL token is stale — without this the dial
-      // loop retries the same dead token until the next rotation
-      if (classifyClose(err instanceof Error ? (err as CloseLike) : msg) === 'auth-expired') {
+      // loop retries the same dead token until the next rotation (resolved
+      // pools are rebuilt fresh by the next ensureAlive instead)
+      if (!resolveServers && classifyClose(err instanceof Error ? (err as CloseLike) : msg) === 'auth-expired') {
         emitter.emit('auth-error', { message: msg });
       }
       markDown(msg);
@@ -270,6 +352,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     markUp();
     notifyClient();
     startStatusMonitor(next);
+    startRefresh(next);
   }
 
   async function apply(target: ConnectionTarget | null): Promise<void> {
@@ -282,6 +365,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
 
     if (!target) {
       stopStatusMonitor();
+      stopRefresh();
       pendingConnectAbort?.abort();
       pendingConnectAbort = null;
       if (proxy) {
@@ -314,8 +398,9 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     // token (server only validates at handshake); the new token applies at
     // the next natural reconnect. This matches the existing managed.ts
     // behaviour and avoids gratuitous disconnects on every refresh.
-    const newServers = buildServers(target);
-    proxy.setServers(newServers);
+    const p = proxy;
+    const newServers = await serversFor(target);
+    if (proxy === p && epoch === applyEpoch) p.setServers(newServers);
   }
 
   function health(): TransportStatus {
@@ -337,6 +422,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     disposed = true;
     applyEpoch++;
     stopStatusMonitor();
+    stopRefresh();
     pendingConnectAbort?.abort();
     pendingConnectAbort = null;
     if (proxy) {

@@ -222,3 +222,64 @@ describe('attachWorkerBridge', () => {
     expect(onSyncHost).toHaveBeenCalledWith(2);
   });
 });
+
+describe('attachWorkerBridge — resolve relay', () => {
+  function online(): ReturnType<typeof createKernel> {
+    const kernel = createKernel({ context: makeCtx() });
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
+    return kernel;
+  }
+
+  async function flush(): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  it('answers with the resolver result using the kernel target', async () => {
+    const kernel = online();
+    const host = new FakeHost();
+    const resolveServers = vi.fn(async () => ['wss://signed']);
+    const bridge = attachWorkerBridge({ kernel, hosts: () => [host], resolveServers });
+    bridge.syncHost(host);
+    host.deliver({ type: 'kernel-resolve-request', id: 7, connId: 'c-1', defaultServers: ['wss://a'] });
+    await flush();
+
+    expect(resolveServers).toHaveBeenCalledWith({ target: { endpoint: LAN, tokens: TOKENS }, connId: 'c-1', defaultServers: ['wss://a'] });
+    expect(host.sent.at(-1)).toEqual({ type: 'kernel-resolve-reply', id: 7, servers: ['wss://signed'] });
+  });
+
+  it('returns the defaults when no resolver is configured but resync listening is on', async () => {
+    const kernel = online();
+    const host = new FakeHost();
+    const bridge = attachWorkerBridge({ kernel, hosts: () => [host], listenForResyncRequests: true });
+    bridge.syncHost(host);
+    host.deliver({ type: 'kernel-resolve-request', id: 1, connId: 'c-1', defaultServers: ['wss://a'] });
+    await flush();
+    expect(host.sent.at(-1)).toEqual({ type: 'kernel-resolve-reply', id: 1, servers: ['wss://a'] });
+  });
+
+  it('replies with an error while the kernel is offline or the resolver throws', async () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const host = new FakeHost();
+    const bridge = attachWorkerBridge({ kernel, hosts: () => [host], resolveServers: async () => ['x'] });
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    bridge.syncHost(host);
+    host.deliver({ type: 'kernel-resolve-request', id: 1, connId: 'c-1', defaultServers: [] });
+    await flush();
+    expect(host.sent.at(-1)).toEqual({ type: 'kernel-resolve-reply', id: 1, error: 'kernel discovering' });
+
+    kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
+    const failing = new FakeHost();
+    const failingBridge = attachWorkerBridge({
+      kernel,
+      hosts: () => [failing],
+      resolveServers: async () => {
+        throw new Error('sign failed');
+      },
+    });
+    failingBridge.syncHost(failing);
+    failing.deliver({ type: 'kernel-resolve-request', id: 2, connId: 'c-1', defaultServers: [] });
+    await flush();
+    expect(failing.sent.at(-1)).toEqual({ type: 'kernel-resolve-reply', id: 2, error: 'sign failed' });
+  });
+});

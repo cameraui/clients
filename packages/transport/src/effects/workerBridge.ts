@@ -1,17 +1,24 @@
 import { Logger } from '@camera.ui/logger';
 
 import type { Kernel } from '../core/kernel.js';
-import type { ConnectionPhase } from '../core/types.js';
-import type { KernelSyncMessage, WorkerHost, WorkerMessage } from '../worker/protocol.js';
+import type { ConnectionPhase, ConnectionTarget } from '../core/types.js';
+import type { KernelResolveReplyMessage, KernelResolveRequestMessage, KernelSyncMessage, WorkerHost, WorkerMessage } from '../worker/protocol.js';
 
 const log = new Logger('workerBridge');
 
 export type Detach = () => void;
 
+export interface BridgeResolveContext {
+  readonly target: ConnectionTarget;
+  readonly connId: string;
+  readonly defaultServers: readonly string[];
+}
+
 export interface WorkerBridgeOptions {
   readonly kernel: Kernel;
-  readonly hosts: () => Iterable<WorkerHost>;
   readonly listenForResyncRequests?: boolean;
+  readonly hosts: () => Iterable<WorkerHost>;
+  readonly resolveServers?: (ctx: BridgeResolveContext) => Promise<string[]>;
   readonly onBroadcast?: (generation: number, hostCount: number) => void;
   readonly onSyncHost?: (generation: number) => void;
 }
@@ -30,7 +37,7 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
 
   function makeSync(phase: ConnectionPhase): KernelSyncMessage {
     generation++;
-    return { type: 'kernel-sync', generation, phase };
+    return { type: 'kernel-sync', generation, phase, resolver: options.resolveServers !== undefined };
   }
 
   function broadcast(phase: ConnectionPhase): void {
@@ -61,14 +68,41 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
     }
   }
 
+  async function answerResolve(host: WorkerHost, req: KernelResolveRequestMessage): Promise<void> {
+    const reply = (msg: Omit<KernelResolveReplyMessage, 'type' | 'id'>): void => {
+      try {
+        host.postMessage({ type: 'kernel-resolve-reply', id: req.id, ...msg });
+      } catch (err) {
+        log.warn('resolve reply postMessage failed', err);
+      }
+    };
+    if (!options.resolveServers) {
+      reply({ servers: [...req.defaultServers] });
+      return;
+    }
+    const phase = options.kernel.phase;
+    if (phase.kind !== 'online') {
+      reply({ error: `kernel ${phase.kind}` });
+      return;
+    }
+    try {
+      reply({ servers: await options.resolveServers({ target: phase.target, connId: req.connId, defaultServers: req.defaultServers }) });
+    } catch (err) {
+      reply({ error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
   function maybeAttachHostListener(host: WorkerHost): void {
-    if (!options.listenForResyncRequests) return;
+    if (!options.listenForResyncRequests && !options.resolveServers) return;
     if (!host.addEventListener) return;
     if (hostListenerCleanups.has(host)) return; // already wired
     const listener = (event: MessageEvent<WorkerMessage>): void => {
       if (detached) return;
-      if (event.data?.type === 'kernel-sync-request') {
+      const msg = event.data;
+      if (msg?.type === 'kernel-sync-request' && options.listenForResyncRequests) {
         syncOne(host);
+      } else if (msg?.type === 'kernel-resolve-request') {
+        void answerResolve(host, msg);
       }
     };
     host.addEventListener('message', listener);

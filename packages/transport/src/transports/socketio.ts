@@ -16,9 +16,19 @@ const SOCKETIO_SPEC: TransportSpec = {
   phaseGating: true,
 };
 
+export interface ResolveSocketQueryContext {
+  readonly target: ConnectionTarget;
+  readonly path: string;
+  readonly query: Record<string, string>;
+}
+
+export type SocketQueryResolver = (ctx: ResolveSocketQueryContext) => Promise<Record<string, string>>;
+
 export interface SocketioTransportOptions {
   readonly spec?: Partial<TransportSpec>;
   readonly path?: string;
+  readonly resolveQuery?: SocketQueryResolver;
+  readonly resolveRefreshMs?: number;
   readonly mainNamespace?: string;
   readonly reconnection?: boolean;
   readonly reconnectionDelay?: number;
@@ -45,11 +55,15 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   const reconnectionDelayMax = options.reconnectionDelayMax ?? 5_000;
   const timeout = options.timeout ?? 20_000;
   const logger = options.logger;
+  const resolveQuery = options.resolveQuery;
+  const resolveRefreshMs = options.resolveRefreshMs ?? 0;
 
   const emitter = new TransportEmitter();
   const sockets = new Map<string, Socket>();
   let manager: Manager | null = null;
   let currentTarget: ConnectionTarget | null = null;
+  let currentQuery: Record<string, string> = {};
+  let refreshTimer: ReturnType<typeof setInterval> | null = null;
   let status: TransportStatus = { up: false };
   let disposed = false;
 
@@ -76,6 +90,39 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     return q;
   }
 
+  async function queryFor(target: ConnectionTarget): Promise<Record<string, string>> {
+    const base = buildQuery(target);
+    if (!resolveQuery) return base;
+    return resolveQuery({ target, path: socketPath(target), query: base });
+  }
+
+  // resolved queries expire (signed paths): the manager re-reads opts.query on every reconnect
+  async function refreshQuery(): Promise<void> {
+    const target = currentTarget;
+    if (!resolveQuery || !target || disposed) return;
+    try {
+      const query = await queryFor(target);
+      if (currentTarget !== target || disposed) return;
+      currentQuery = query;
+      for (const sock of sockets.values()) sock.io.opts.query = query;
+    } catch (err) {
+      logger?.warn(`query refresh failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  function stopRefresh(): void {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+  }
+
+  function startRefresh(): void {
+    stopRefresh();
+    if (!resolveQuery || resolveRefreshMs <= 0) return;
+    refreshTimer = setInterval(() => void refreshQuery(), resolveRefreshMs);
+  }
+
   function markUp(): void {
     if (status.up) return;
     status = { up: true };
@@ -96,7 +143,10 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
   function bindMainSocketEvents(socket: Socket): void {
     socket.on('connect', () => markUp());
-    socket.on('disconnect', (reason: string) => markDown(reason));
+    socket.on('disconnect', (reason: string) => {
+      markDown(reason);
+      if (resolveQuery) void refreshQuery();
+    });
     socket.on('connect_error', (err: Error) => {
       const msg = err?.message ?? 'connect_error';
       logger?.debug(`connect_error (main): ${msg}`);
@@ -129,7 +179,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     const sock = io(url, {
       path: socketPath(target),
       auth: buildAuth(target),
-      query: buildQuery(target),
+      query: currentQuery,
       reconnection,
       reconnectionDelay,
       reconnectionDelayMax,
@@ -141,8 +191,19 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     return sock;
   }
 
-  function rebuildManager(target: ConnectionTarget): void {
+  async function rebuildManager(target: ConnectionTarget): Promise<void> {
+    // resolve before tearing down: while the signer runs nothing may open a socket with a stale query
+    stopRefresh();
+    let query: Record<string, string>;
+    try {
+      query = await queryFor(target);
+    } catch (err) {
+      markDown(err instanceof Error ? err.message : String(err));
+      throw err;
+    }
+    if (currentTarget !== target || disposed) return;
     closeAllSockets();
+    currentQuery = query;
     manager = new Manager(socketOrigin(target), {
       path: socketPath(target),
       autoConnect: false,
@@ -155,6 +216,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     });
     const main = openSocket(mainNs, target);
     bindMainSocketEvents(main);
+    startRefresh();
 
     // the sockets ride io()'s cached manager (main.io), not the local
     // `manager` instance — activity must be observed there
@@ -193,13 +255,14 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
     if (!target) {
       closeAllSockets();
+      stopRefresh();
       lastActivityAt = 0;
       markDown('detached');
       return;
     }
 
     if (endpointChanged || !manager) {
-      rebuildManager(target);
+      await rebuildManager(target);
       return;
     }
     rebindAuth(target);
@@ -217,6 +280,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   async function dispose(): Promise<void> {
     disposed = true;
     closeAllSockets();
+    stopRefresh();
     currentTarget = null;
     status = { up: false };
     emitter.clear();
@@ -227,7 +291,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   }
 
   function ensureSocket(namespace: string): Socket | null {
-    if (!currentTarget) return null;
+    if (!currentTarget || !manager) return null;
     let sock = sockets.get(namespace);
     if (!sock) {
       sock = openSocket(namespace, currentTarget);
@@ -261,6 +325,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
   async function ensureAlive(): Promise<TransportStatus> {
     if (disposed || !currentTarget) return health();
+    if (resolveQuery) await refreshQuery();
     reviveDeadSockets();
     return health();
   }

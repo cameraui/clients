@@ -282,3 +282,51 @@ describe('createWsTransport — apply lifecycle', () => {
     expect(t.handleCount).toBe(0);
   });
 });
+
+describe('createWsTransport — resolveUrl', () => {
+  async function flush(): Promise<void> {
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  it('opens the socket on the resolved URL', async () => {
+    MockWebSocket.instances = [];
+    const resolveUrl = vi.fn(async ({ defaultUrl }: { defaultUrl: string }) => `${defaultUrl}&authSig=sig`);
+    const t = createWsTransport({ webSocketCtor: MockWebSocket as unknown as typeof WebSocket, resolveUrl });
+    t.open({ path: '/api/stream', query: { src: 'cam-1' } });
+    await t.apply(T1);
+    await flush();
+    expect(MockWebSocket.instances).toHaveLength(1);
+    expect(MockWebSocket.instances[0]!.url).toContain('authSig=sig');
+    expect(resolveUrl.mock.calls[0]![0]).toMatchObject({ target: T1, spec: { path: '/api/stream' } });
+  });
+
+  it('drops a resolved URL when the handle was closed meanwhile', async () => {
+    MockWebSocket.instances = [];
+    let release: (url: string) => void = () => {};
+    const resolveUrl = () => new Promise<string>((r) => (release = r));
+    const t = createWsTransport({ webSocketCtor: MockWebSocket as unknown as typeof WebSocket, resolveUrl });
+    const h = t.open({ path: '/api/stream' });
+    await t.apply(T1);
+    h.dispose();
+    release('wss://late');
+    await flush();
+    expect(MockWebSocket.instances).toHaveLength(0);
+  });
+
+  it('delivers a synthetic close when resolving fails', async () => {
+    MockWebSocket.instances = [];
+    const t = createWsTransport({
+      webSocketCtor: MockWebSocket as unknown as typeof WebSocket,
+      resolveUrl: async () => {
+        throw new Error('no sign');
+      },
+    });
+    const h = t.open({ path: '/api/stream' });
+    const close = vi.fn();
+    h.on('close', close);
+    await t.apply(T1);
+    await flush();
+    expect(MockWebSocket.instances).toHaveLength(0);
+    expect(close).toHaveBeenCalledWith({ code: 4003, reason: 'resolve-failed', wasClean: false });
+  });
+});

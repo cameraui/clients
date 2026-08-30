@@ -14,6 +14,7 @@ const WS_SPEC: TransportSpec = {
 const WS_CLOSE_TARGET_CHANGED = 4000;
 const WS_CLOSE_DETACHED = 4001;
 const WS_CLOSE_DISPOSED = 4002;
+const WS_CLOSE_RESOLVE_FAILED = 4003;
 
 export interface WsHandleSpec {
   readonly path: string;
@@ -51,12 +52,21 @@ export interface WsHandle {
   dispose(): void;
 }
 
+export interface ResolveWsUrlContext {
+  readonly target: ConnectionTarget;
+  readonly spec: WsHandleSpec;
+  readonly defaultUrl: string;
+}
+
+export type WsUrlResolver = (ctx: ResolveWsUrlContext) => Promise<string>;
+
 export interface WsTransportOptions {
   readonly spec?: Partial<TransportSpec>;
   readonly webSocketCtor?: typeof WebSocket;
   readonly tokenParam?: string;
   readonly sessionParam?: string;
   readonly logger?: Logger;
+  readonly resolveUrl?: WsUrlResolver;
 }
 
 export interface WsTransport extends PerResourceTransport<WsHandle, WsHandleSpec> {
@@ -70,6 +80,7 @@ interface InternalHandle {
   ws: WebSocket | null;
   url: string | null;
   disposed: boolean;
+  openSeq: number;
 }
 
 export function createWsTransport(options: WsTransportOptions = {}): WsTransport {
@@ -77,6 +88,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
   const tokenParam = options.tokenParam ?? 'token';
   const sessionParam = options.sessionParam ?? 'session';
   const WsCtor = options.webSocketCtor ?? (typeof WebSocket !== 'undefined' ? WebSocket : undefined);
+  const resolveUrl = options.resolveUrl;
 
   const logger = options.logger;
 
@@ -152,6 +164,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
   }
 
   function closeWs(handle: InternalHandle, code: number, reason: string): void {
+    handle.openSeq++;
     const ws = handle.ws;
     if (!ws) return;
     const Ctor = ensureCtor();
@@ -177,16 +190,39 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
     for (const fn of [...handle.listeners.close]) fn(info);
   }
 
-  function openWs(handle: InternalHandle): void {
-    if (handle.disposed) return;
-    if (!currentTarget) return;
-    const url = buildUrl(currentTarget, handle.spec);
+  function connectWs(handle: InternalHandle, url: string): void {
     const Ctor = ensureCtor();
     const ws = new Ctor(url, handle.spec.protocols as string | string[] | undefined);
     if (handle.spec.binaryType) ws.binaryType = handle.spec.binaryType;
     handle.ws = ws;
     handle.url = url;
     bindWs(handle, ws);
+  }
+
+  function openWs(handle: InternalHandle): void {
+    if (handle.disposed) return;
+    if (!currentTarget) return;
+    const target = currentTarget;
+    const defaultUrl = buildUrl(target, handle.spec);
+    if (!resolveUrl) {
+      connectWs(handle, defaultUrl);
+      return;
+    }
+    // a close/recycle/dispose while resolving bumps openSeq, the late URL is dropped
+    const seq = ++handle.openSeq;
+    resolveUrl({ target, spec: handle.spec, defaultUrl }).then(
+      (url) => {
+        if (handle.disposed || seq !== handle.openSeq || currentTarget !== target) return;
+        connectWs(handle, url);
+      },
+      (err: unknown) => {
+        if (handle.disposed || seq !== handle.openSeq) return;
+        const reason = err instanceof Error ? err.message : String(err);
+        logger?.warn(`resolveUrl failed for ${handle.spec.path}: ${reason}`);
+        const info: WsCloseInfo = { code: WS_CLOSE_RESOLVE_FAILED, reason: 'resolve-failed', wasClean: false };
+        for (const fn of [...handle.listeners.close]) fn(info);
+      },
+    );
   }
 
   function recycleAll(code: number, reason: string): void {
@@ -264,6 +300,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
       ws: null,
       url: null,
       disposed: false,
+      openSeq: 0,
     };
 
     function send(data: string | ArrayBufferLike | Blob | ArrayBufferView): void {

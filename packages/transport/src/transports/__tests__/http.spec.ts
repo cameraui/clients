@@ -174,3 +174,26 @@ describe('createHttpTransport — request interceptor', () => {
     expect(t.health().up).toBe(false);
   });
 });
+
+describe('createHttpTransport — authorize hook', () => {
+  it('replaces the default Bearer header', async () => {
+    const authorize = vi.fn((config: { headers: { set: (k: string, v: string) => void } }) => {
+      config.headers.set('Authorization', 'Bearer ha-token');
+    });
+    const t = createHttpTransport({ authorize });
+    await t.apply(T2);
+    const adapter = vi.fn(async (config: { headers: Record<string, unknown>; baseURL?: string }) => ({
+      data: {},
+      status: 200,
+      statusText: 'OK',
+      headers: {},
+      config,
+    }));
+    await t.client.get('/cameras', { adapter: adapter as never });
+    expect(authorize).toHaveBeenCalledTimes(1);
+    const config = adapter.mock.calls[0]![0];
+    expect(config.baseURL).toBe('https://nvr.example.com/api');
+    expect(String(config.headers.Authorization)).toBe('Bearer ha-token');
+    expect(String(config.headers['X-Proxy-Session'])).toBe('ps-1');
+  });
+});

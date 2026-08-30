@@ -13,11 +13,14 @@ const HTTP_SPEC: TransportSpec = {
   phaseGating: false,
 };
 
+export type HttpAuthorizer = (config: InternalAxiosRequestConfig, target: ConnectionTarget) => void | Promise<void>;
+
 export interface HttpTransportOptions {
   readonly apiPrefix?: string;
   readonly timeoutMs?: number;
   readonly targetWaitMs?: number;
   readonly spec?: Partial<TransportSpec>;
+  readonly authorize?: HttpAuthorizer;
   readonly logger?: Logger;
 }
 
@@ -92,7 +95,11 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
     if (!config.baseURL) {
       config.baseURL = `${target.endpoint.url}${apiPrefix}`;
     }
-    config.headers.set('Authorization', `Bearer ${target.tokens.access}`);
+    if (options.authorize) {
+      await options.authorize(config, target);
+    } else {
+      config.headers.set('Authorization', `Bearer ${target.tokens.access}`);
+    }
     if (target.tokens.proxySession) {
       config.headers.set('X-Proxy-Session', target.tokens.proxySession);
     }
