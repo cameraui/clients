@@ -36,7 +36,7 @@ export function attachDegradedRecovery(options: DegradedRecoveryOptions): Detach
     if (detached || timer !== null) return;
     timer = setTimeout(() => {
       timer = null;
-      void escalate();
+      escalate();
     }, graceMs);
   }
 

@@ -171,7 +171,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
 
   function reload(): void {
     const name = toValue(pluginName);
-    if (name) void loadPlugin(name, true);
+    if (name) loadPlugin(name, true);
   }
 
   function markUnavailable(name: string): void {
@@ -204,7 +204,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
     }
 
     watchPlugin(name);
-    void ensureStatusSubscription(rpc);
+    ensureStatusSubscription(rpc);
 
     // the plugin went down: the cache entry is dropped while this instance
     // still holds its ref, so re-resolve instead of handing out the dead proxy

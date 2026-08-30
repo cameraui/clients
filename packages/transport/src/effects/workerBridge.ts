@@ -102,7 +102,7 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
       if (msg?.type === 'kernel-sync-request' && options.listenForResyncRequests) {
         syncOne(host);
       } else if (msg?.type === 'kernel-resolve-request') {
-        void answerResolve(host, msg);
+        answerResolve(host, msg);
       }
     };
     host.addEventListener('message', listener);

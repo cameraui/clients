@@ -46,7 +46,7 @@ export function attachTransportSync(options: TransportSyncOptions): Detach {
 
   function applyOne(transport: Transport, target: ConnectionTarget | null): void {
     applied.set(transport, target);
-    void transport.apply(target).catch((err: unknown) => {
+    transport.apply(target).catch((err: unknown) => {
       options.onError?.(transport, target, err);
       if (applied.get(transport) === target) {
         applied.delete(transport);
