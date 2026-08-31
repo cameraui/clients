@@ -104,6 +104,9 @@ export interface UseCameraStreamOptions {
 
 export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   const { activityConfig, autoStart: autoStartOption = true, isolated = false } = options;
+  // flips to true when a second simultaneously visible consumer must leave the shared entry alone
+  let effectiveIsolated = isolated;
+  let conflictTimer: ReturnType<typeof setTimeout> | undefined;
   const shouldAutoStart = () => toValue(autoStartOption);
   const startDelay = options.startDelay ?? acquireAutoStaggerDelay();
   const cleanupFns: WatchStopHandle[] = [];
@@ -240,7 +243,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   }
 
   function reclaimSharedVideo(): void {
-    if (isolated) return;
+    if (effectiveIsolated) return;
     const container = containerElement.value;
     const video = videoElement.value;
     if (!container || !video || video.parentElement === container) return;
@@ -285,7 +288,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   function initialize(): void {
     if (initialized.value) return;
 
-    if (isolated) {
+    if (effectiveIsolated) {
       initializeIsolated();
       return;
     }
@@ -295,6 +298,34 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     const camDevice = resolvedCameraDevice.value;
 
     if (!container || !camName || !isConnected.value) return;
+
+    // the single shared <video> cannot sit in two visible cards at once (dashboard card + dialog,
+    // the same camera in two grids): joining would start a tug-of-war over the element, so the
+    // newcomer runs its own session. A short grace re-check first: on expand/remount the old host
+    // is still visible for a beat before it hides, and that handover must stay a seamless join.
+    const existing = streamManager.get(camName);
+    if (existing && existing.refCount > 0) {
+      const activeHost = existing.containerElementRef.value;
+      if (activeHost && activeHost !== container && isElementVisible(activeHost)) {
+        if (!conflictTimer) {
+          conflictTimer = setTimeout(() => {
+            conflictTimer = undefined;
+            if (cleanedUp.value || initialized.value) return;
+            const entry = streamManager.get(camName);
+            const host = entry?.containerElementRef.value;
+            if (entry && entry.refCount > 0 && host && host !== containerElement.value && isElementVisible(host)) {
+              effectiveIsolated = true;
+            }
+            initialize();
+          }, 200);
+          cleanupFns.push(() => {
+            if (conflictTimer) clearTimeout(conflictTimer);
+            conflictTimer = undefined;
+          });
+        }
+        return;
+      }
+    }
 
     const cached = streamManager.acquire(camName, containerElement);
 
@@ -566,7 +597,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     }
     cleanupFns.length = 0;
 
-    if (isolated) {
+    if (effectiveIsolated) {
       ownedConnection?.destroy();
     } else {
       const camName = registeredCamName;
