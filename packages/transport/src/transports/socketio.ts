@@ -70,6 +70,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   let queryRefreshing = false;
   let status: TransportStatus = { up: false };
   let disposed = false;
+  let applyEpoch = 0;
 
   const staleAfterMs = options.staleAfterMs ?? 60_000;
   let lastActivityAt = 0;
@@ -273,7 +274,15 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     }
 
     if (endpointChanged || !manager) {
-      await rebuildManager(target);
+      const epoch = ++applyEpoch;
+      try {
+        await rebuildManager(target);
+      } catch (err) {
+        // a failed rebuild must not leave currentTarget pointing at a target we
+        // never connected to, the same-target dedupe would swallow every retry
+        if (epoch === applyEpoch && currentTarget === target) currentTarget = null;
+        throw err;
+      }
       return;
     }
     rebindAuth(target);
