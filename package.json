@@ -16,7 +16,7 @@
     "lint": "npm run lint --workspaces --if-present",
     "release": "bash scripts/release.sh",
     "test": "npm run test --workspaces --if-present",
-    "update": "updates --update ./ && npm run update --workspaces --if-present"
+    "update": "updates -M npm,pypi,go,cargo,docker,make --update ./ && npm run update --workspaces --if-present"
   },
   "homepage": "https://github.com/cameraui/clients#readme",
   "bugs": {
@@ -33,7 +33,7 @@
     "@vue/language-core": "^3.3.11",
     "tsx": "^4.23.13",
     "typescript": "5.9.3",
-    "updates": "^18.0.7"
+    "updates": "^18.1.0"
   },
   "overrides": {
     "@vue/language-core": "$@vue/language-core"
