@@ -140,6 +140,7 @@ export interface ReactiveSensor<TProperties extends object = Record<string, unkn
   readonly displayName: Ref<string>;
   readonly nativeId?: string;
   readonly pluginId: string;
+  readonly boundCameraId?: string;
   readonly assignedCameraIds: Ref<string[]>;
   readonly exposed: Ref<boolean>;
   readonly connected: Ref<boolean>;
@@ -446,6 +447,7 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
     displayName,
     nativeId: data.nativeId,
     pluginId: data.pluginId,
+    boundCameraId: data.boundCameraId,
     assignedCameraIds,
     exposed,
     connected,
