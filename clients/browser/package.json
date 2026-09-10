@@ -54,7 +54,7 @@
     "@vueuse/core": "^14.4.0",
     "@webgpu/types": "^0.1.72",
     "eslint": "9.39.2",
-    "eslint-plugin-vue": "^10.10.0",
+    "eslint-plugin-vue": "^10.11.0",
     "globals": "^17.12.0",
     "prettier": "^3.9.6",
     "rimraf": "^6.1.3",
