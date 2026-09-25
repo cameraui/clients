@@ -6,7 +6,7 @@ import type { ComputedRef, MaybeRefOrGetter } from 'vue';
 interface FsState {
   wrapper: HTMLElement;
   parent: HTMLElement | null;
-  next: Node | null;
+  placeholder: Comment;
   bodyOverflow: string;
   htmlOverflow: string;
   scrollY: number;
@@ -72,10 +72,14 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
     wrapper.className = `cui-fullscreen cui-fullscreen-${mode}`;
     applyWrapperStyles(wrapper, mode);
 
+    // the host may swap the element's siblings while it is away, a marker of our own keeps its place
+    const placeholder = document.createComment('cui-fullscreen');
+    el.before(placeholder);
+
     const state: FsState = {
       wrapper,
       parent: el.parentElement,
-      next: el.nextSibling,
+      placeholder,
       bodyOverflow: document.body.style.overflow,
       htmlOverflow: document.documentElement.style.overflow,
       scrollY: window.scrollY,
@@ -111,12 +115,10 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
 
     el.removeAttribute('data-cui-fullscreen');
 
-    if (state.parent) {
-      if (state.next && state.next.parentNode === state.parent) {
-        state.parent.insertBefore(el, state.next);
-      } else {
-        state.parent.appendChild(el);
-      }
+    if (state.placeholder.parentNode) {
+      state.placeholder.replaceWith(el);
+    } else {
+      state.parent?.appendChild(el);
     }
     state.wrapper.remove();
 
