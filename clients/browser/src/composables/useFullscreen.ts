@@ -9,6 +9,7 @@ interface FsState {
   next: Node | null;
   bodyOverflow: string;
   htmlOverflow: string;
+  scrollY: number;
 }
 
 const fsRegistry = new WeakMap<HTMLElement, FsState>();
@@ -77,6 +78,7 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
       next: el.nextSibling,
       bodyOverflow: document.body.style.overflow,
       htmlOverflow: document.documentElement.style.overflow,
+      scrollY: window.scrollY,
     };
     fsRegistry.set(el, state);
 
@@ -88,6 +90,8 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
     // has its own scroll behavior in 'scroll' mode.
     document.body.style.overflow = 'hidden';
     document.documentElement.style.overflow = 'hidden';
+    // overlays inside the wrapper position themselves in page coordinates, the fixed wrapper starts at the viewport top
+    window.scrollTo({ top: 0, behavior: 'instant' });
 
     document.addEventListener('keydown', onEscape);
 
@@ -118,6 +122,7 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
 
     document.body.style.overflow = state.bodyOverflow;
     document.documentElement.style.overflow = state.htmlOverflow;
+    window.scrollTo({ top: state.scrollY, behavior: 'instant' });
 
     document.removeEventListener('keydown', onEscape);
 
