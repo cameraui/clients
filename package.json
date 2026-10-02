@@ -29,8 +29,8 @@
   "license": "MIT",
   "author": "seydx",
   "devDependencies": {
-    "@types/node": "^26.6.3",
-    "@vue/language-core": "^3.3.11",
+    "@types/node": "^26.6.4",
+    "@vue/language-core": "^3.3.12",
     "tsx": "^4.23.15",
     "typescript": "5.9.3",
     "updates": "^19.2.0"
