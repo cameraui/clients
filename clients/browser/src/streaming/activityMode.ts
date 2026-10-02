@@ -5,6 +5,7 @@ import type { Ref } from 'vue';
 const DEFAULT_CONFIG: Required<ActivityModeConfig> = {
   standbyTimeout: 5000,
   activityTimeout: 5000,
+  wakeTimeout: 30000,
 };
 
 export type CameraActivityMode = 'always-on' | 'standby' | 'activity';
@@ -12,6 +13,7 @@ export type CameraActivityMode = 'always-on' | 'standby' | 'activity';
 export interface ActivityModeConfig {
   standbyTimeout?: number;
   activityTimeout?: number;
+  wakeTimeout?: number;
 }
 
 export interface ActivityModeState {
@@ -22,9 +24,11 @@ export interface ActivityModeState {
 
 export interface ActivityModeActions {
   setMode: (mode: CameraActivityMode) => void;
+  engage: () => void;
   reportActivity: (hasActivity: boolean) => void;
   resumeFromStandby: () => void;
   resetIdleTimer: () => void;
+  setKeepAwake: (awake: boolean) => void;
   dispose: () => void;
 }
 
@@ -49,6 +53,8 @@ export function createActivityMode(options: CreateActivityModeOptions): Activity
 
   let activityTimeout: NodeJS.Timeout | undefined;
   let idleTimeout: NodeJS.Timeout | undefined;
+  let keepAwake = false;
+  let engaged = false;
 
   function clearActivityTimeout(): void {
     if (activityTimeout) {
@@ -123,18 +129,31 @@ export function createActivityMode(options: CreateActivityModeOptions): Activity
 
   function startIdleTimer(): void {
     clearIdleTimeout();
+    if (keepAwake) return;
+    const timeout = isStreamPlaying() ? resolvedConfig.standbyTimeout : resolvedConfig.wakeTimeout;
     idleTimeout = setTimeout(() => {
       if (mode.value === 'standby') {
         goToStandby();
       }
-    }, resolvedConfig.standbyTimeout);
+    }, timeout);
   }
 
   function setMode(newMode: CameraActivityMode): void {
     if (mode.value !== newMode) {
       mode.value = newMode;
-      manageStreamState();
+      if (engaged) manageStreamState();
     }
+  }
+
+  function engage(): void {
+    engaged = true;
+    const rests = mode.value === 'standby' || (mode.value === 'activity' && !hasActivity.value);
+    if (rests && !isStreamPlaying()) {
+      clearAllTimers();
+      goToStandby();
+      return;
+    }
+    manageStreamState();
   }
 
   function reportActivity(detected: boolean): void {
@@ -146,8 +165,10 @@ export function createActivityMode(options: CreateActivityModeOptions): Activity
       hasActivity.value = true;
       clearActivityTimeout();
 
-      if (inStandby.value || !isStreamPlaying()) {
+      if (inStandby.value) {
         exitStandby();
+      } else if (!isStreamPlaying()) {
+        onStreamStart();
       }
     } else {
       hasActivity.value = false;
@@ -184,8 +205,18 @@ export function createActivityMode(options: CreateActivityModeOptions): Activity
   }
 
   function resetIdleTimer(): void {
-    if (mode.value === 'standby' && !inStandby.value) {
+    if (engaged && mode.value === 'standby' && !inStandby.value) {
       startIdleTimer();
+    }
+  }
+
+  function setKeepAwake(awake: boolean): void {
+    if (keepAwake === awake) return;
+    keepAwake = awake;
+    if (awake) {
+      clearIdleTimeout();
+    } else {
+      resetIdleTimer();
     }
   }
 
@@ -198,9 +229,11 @@ export function createActivityMode(options: CreateActivityModeOptions): Activity
     inStandby,
     hasActivity,
     setMode,
+    engage,
     reportActivity,
     resumeFromStandby,
     resetIdleTimer,
+    setKeepAwake,
     dispose,
   };
 }
