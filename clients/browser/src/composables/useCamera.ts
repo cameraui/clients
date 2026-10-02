@@ -15,10 +15,10 @@ import type {
   RefreshedStates,
   SensorAddedEvent,
   SensorAssignmentChangedEvent,
-  SensorRefreshedState,
-  SensorRegistryNamespaces,
   SensorConnectedChangedEvent,
   SensorDeletedEvent,
+  SensorRefreshedState,
+  SensorRegistryNamespaces,
 } from '../server/index.js';
 import type { ReactiveCameraDevice } from '../types.js';
 
@@ -236,7 +236,12 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
     return probeStream(id, probeConfig, refresh);
   }
 
-  await init();
+  try {
+    await init();
+  } catch (err) {
+    await close();
+    throw err;
+  }
 
   return {
     id: initialCamera._id,

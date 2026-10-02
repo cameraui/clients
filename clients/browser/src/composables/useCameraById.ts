@@ -22,6 +22,9 @@ const cameraCache = createDebouncedCache<ReactiveCameraDevice>({
 
 const pendingLoads = new Map<string, Promise<ReactiveCameraDevice | undefined>>();
 
+const LOAD_RETRY_MIN_MS = 1_000;
+const LOAD_RETRY_MAX_MS = 30_000;
+
 export function clearCameraCache(): void {
   cameraCache.clear();
   pendingLoads.clear();
@@ -71,9 +74,40 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
   const error = ref<Error | undefined>();
 
   let currentCameraId: string | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryDelay = LOAD_RETRY_MIN_MS;
+  let disposed = false;
 
-  async function loadCamera(id: string): Promise<void> {
-    if (!isConnected.value || !id) return;
+  function bindCamera(id: string, device: ReactiveCameraDevice): void {
+    currentCameraId = id;
+    camera.value = device;
+    error.value = undefined;
+    cancelRetry();
+  }
+
+  function failLoad(id: string, err: unknown): void {
+    error.value = err instanceof Error ? err : new Error(String(err));
+    scheduleRetry(id);
+  }
+
+  function scheduleRetry(id: string): void {
+    if (retryTimer || disposed) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      if (isConnected.value && toValue(cameraIdOrName) === id && currentCameraId !== id) loadCamera(id, true).catch(() => {});
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, LOAD_RETRY_MAX_MS);
+  }
+
+  function cancelRetry(): void {
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
+    retryDelay = LOAD_RETRY_MIN_MS;
+  }
+
+  // a retry runs quietly, the error of the failed attempt stays until one succeeds
+  async function loadCamera(id: string, retry = false): Promise<void> {
+    if (disposed || !isConnected.value || !id) return;
 
     if (currentCameraId && currentCameraId !== id) {
       cameraCache.release(currentCameraId);
@@ -85,24 +119,22 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
       const cached = cameraCache.acquire(id, () => {
         throw new Error('Should not create - already cached');
       });
-      currentCameraId = id;
-      camera.value = cached;
+      bindCamera(id, cached);
       initialLoadDone.value = true;
       return;
     }
 
     const pending = pendingLoads.get(id);
     if (pending) {
-      _isLoading.value = true;
+      if (!retry) _isLoading.value = true;
       try {
         const device = await pending;
-        if (device && cameraCache.has(id) && toValue(cameraIdOrName) === id) {
+        if (device && !disposed && cameraCache.has(id) && toValue(cameraIdOrName) === id) {
           const cached = cameraCache.acquire(id, () => device);
-          currentCameraId = id;
-          camera.value = cached;
+          bindCamera(id, cached);
         }
       } catch (err) {
-        error.value = err instanceof Error ? err : new Error(String(err));
+        failLoad(id, err);
       } finally {
         _isLoading.value = false;
         initialLoadDone.value = true;
@@ -110,8 +142,10 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
       return;
     }
 
-    _isLoading.value = true;
-    error.value = undefined;
+    if (!retry) {
+      _isLoading.value = true;
+      error.value = undefined;
+    }
 
     const loadPromise = deviceManager.getCamera(id);
     pendingLoads.set(id, loadPromise);
@@ -120,15 +154,14 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
       const device = await loadPromise;
       if (device) {
         cameraCache.acquire(id, () => device);
-        if (toValue(cameraIdOrName) !== id) {
+        if (disposed || toValue(cameraIdOrName) !== id) {
           cameraCache.release(id);
           return;
         }
-        currentCameraId = id;
-        camera.value = device;
+        bindCamera(id, device);
       }
     } catch (err) {
-      error.value = err instanceof Error ? err : new Error(String(err));
+      failLoad(id, err);
     } finally {
       pendingLoads.delete(id);
       _isLoading.value = false;
@@ -156,6 +189,7 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
   watch(
     [isConnected, () => toValue(cameraIdOrName)],
     async ([connected, id]) => {
+      cancelRetry();
       if (connected && id) {
         await loadCamera(id);
       } else if (!connected && currentCameraId) {
@@ -168,6 +202,8 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
   );
 
   tryOnScopeDispose(() => {
+    disposed = true;
+    cancelRetry();
     if (currentCameraId) {
       cameraCache.release(currentCameraId);
       camera.value = undefined;
