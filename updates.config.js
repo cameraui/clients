@@ -1,3 +1,3 @@
 export default {
-  exclude: ['typescript', 'eslint', '@eslint/js'],
+  exclude: ['typescript', 'eslint', '@eslint/js', 'vue-tsc'],
 };
