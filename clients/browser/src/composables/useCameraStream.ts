@@ -79,6 +79,8 @@ export interface CameraStream {
   setMicrophone: (track: MediaStreamTrack | null) => Promise<void>;
   setActivityMode: (mode: CameraActivityMode) => void;
   reportActivity: (hasActivity: boolean) => void;
+  resetIdleTimer: () => void;
+  setKeepAwake: (awake: boolean) => void;
   setMuted: (muted: boolean) => void;
   play: () => Promise<void>;
   pause: () => void;
@@ -541,8 +543,21 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     activityModeManager.setMode(mode);
   }
 
+  function syncActivityMode(): void {
+    const mode = toValue(options.activityMode);
+    if (mode && mode !== activityModeManager.mode.value) activityModeManager.setMode(mode);
+  }
+
   function reportActivity(detected: boolean): void {
     activityModeManager.reportActivity(detected);
+  }
+
+  function resetIdleTimer(): void {
+    activityModeManager.resetIdleTimer();
+  }
+
+  function setKeepAwake(awake: boolean): void {
+    activityModeManager.setKeepAwake(awake);
   }
 
   function setMuted(newMuted: boolean): void {
@@ -783,14 +798,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     { immediate: true },
   );
 
-  watch(
-    () => toValue(options.activityMode),
-    (newMode) => {
-      if (newMode && newMode !== activityModeManager.mode.value) {
-        activityModeManager.setMode(newMode);
-      }
-    },
-  );
+  watch(() => toValue(options.activityMode), syncActivityMode);
 
   watch(
     [containerElement, resolvedCameraDevice, isConnected, autoStartReady],
@@ -814,12 +822,28 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     { immediate: true },
   );
 
+  let activityEngaged = false;
+  watch(
+    () => initialized.value && autoStartReady.value && shouldAutoStart() && !isCameraDisabled.value,
+    (ready) => {
+      if (!ready || activityEngaged) return;
+      activityEngaged = true;
+      syncActivityMode();
+      activityModeManager.engage();
+    },
+    { immediate: true },
+  );
+
+  watch(isPlaying, (playing) => {
+    if (playing) activityModeManager.resetIdleTimer();
+  });
+
   watch(isCameraDisabled, (disabled, wasDisabled) => {
     if (!initialized.value) return;
 
     if (!wasDisabled && disabled) {
       currentStream.value?.stop();
-    } else if (wasDisabled && !disabled && shouldAutoStart()) {
+    } else if (wasDisabled && !disabled && shouldAutoStart() && !activityModeManager.inStandby.value) {
       currentStream.value?.restart();
     }
   });
@@ -866,6 +890,8 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     setMicrophone,
     setActivityMode,
     reportActivity,
+    resetIdleTimer,
+    setKeepAwake,
     setMuted,
     play: playStream,
     pause: pauseStream,
