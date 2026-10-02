@@ -495,6 +495,9 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
   };
 }
 
+const INIT_RETRY_MIN_MS = 1_000;
+const INIT_RETRY_MAX_MS = 30_000;
+
 export function createSensorManager(rpcOrContext: RPCClient | ReactiveCameraDeviceContext): ReactiveSensorManager {
   const { sensorsSubject, sensorsRpc } = NamespaceManager.sensorRegistryNamespaces();
   const ctx: ReactiveCameraDeviceContext | undefined =
@@ -509,6 +512,9 @@ export function createSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevi
   const sensorSubscriptions = new Map<string, () => void>();
   const initialized = ref(false);
   let initPromise: Promise<void> | undefined;
+  let generation = 0;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let retryDelay = INIT_RETRY_MIN_MS;
 
   function handlePerSensorEvent(sensorId: string, message: SensorEventMessage): void {
     const sensor = sensorMap.value.get(sensorId);
@@ -580,7 +586,7 @@ export function createSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevi
     }
   }
 
-  async function doInit(): Promise<void> {
+  function dropSubscriptions(): void {
     globalUnsubscribe?.();
     globalUnsubscribe = undefined;
     for (const unsubscribe of sensorSubscriptions.values()) {
@@ -588,34 +594,62 @@ export function createSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevi
     }
     sensorSubscriptions.clear();
     sensorMap.value = new Map();
+  }
+
+  function assertCurrent(run: number): void {
+    if (run !== generation) throw new Error('sensor manager closed');
+  }
+
+  function scheduleRetry(): void {
+    if (retryTimer) return;
+    retryTimer = setTimeout(() => {
+      retryTimer = undefined;
+      if (!initialized.value && !initPromise) launchInit().catch(() => {});
+    }, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, INIT_RETRY_MAX_MS);
+  }
+
+  async function doInit(run: number): Promise<void> {
+    assertCurrent(run);
+    dropSubscriptions();
 
     // Subscribe to global events first, but queue them until the initial load is done
     let pendingEvents: SensorEventMessage[] | undefined = [];
-    globalUnsubscribe = await rpcCall(rpcRef, (c) =>
-      c.subscribe<SensorEventMessage>(sensorsSubject, (msg: SensorEventMessage) => {
-        if (pendingEvents) {
-          pendingEvents.push(msg);
-        } else {
-          handleGlobalSensorEvent(msg);
-        }
-      }),
-    );
+    try {
+      globalUnsubscribe = await rpcCall(rpcRef, (c) =>
+        c.subscribe<SensorEventMessage>(sensorsSubject, (msg: SensorEventMessage) => {
+          if (pendingEvents) {
+            pendingEvents.push(msg);
+          } else {
+            handleGlobalSensorEvent(msg);
+          }
+        }),
+      );
+      assertCurrent(run);
 
-    const [sensors, states] = await rpcCall(rpcRef, async (c) => {
-      const proxy = c.createProxy<SensorRegistryRPC>(sensorsRpc);
-      return Promise.all([proxy.getSensors(), proxy.getSensorStates()]);
-    });
+      const [sensors, states] = await rpcCall(rpcRef, async (c) => {
+        const proxy = c.createProxy<SensorRegistryRPC>(sensorsRpc);
+        return Promise.all([proxy.getSensors(), proxy.getSensorStates()]);
+      });
+      assertCurrent(run);
 
-    const newMap = new Map<string, InternalReactiveSensor>();
-    for (const sensor of sensors) {
-      const state = states[sensor.id] ?? { properties: {}, capabilities: [], type: sensor.type };
-      const reactiveSensor = createReactiveSensor(sensor, state, rpcRef);
-      newMap.set(sensor.id, reactiveSensor);
-    }
-    sensorMap.value = newMap;
+      const newMap = new Map<string, InternalReactiveSensor>();
+      for (const sensor of sensors) {
+        const state = states[sensor.id] ?? { properties: {}, capabilities: [], type: sensor.type };
+        const reactiveSensor = createReactiveSensor(sensor, state, rpcRef);
+        newMap.set(sensor.id, reactiveSensor);
+      }
+      sensorMap.value = newMap;
 
-    for (const sensorId of newMap.keys()) {
-      await subscribeToSensorEvents(sensorId);
+      for (const sensorId of newMap.keys()) {
+        await subscribeToSensorEvents(sensorId);
+        assertCurrent(run);
+      }
+    } catch (err) {
+      // nobody drains the queue of a failed run, and a run that outlived close() belongs to no cached manager
+      dropSubscriptions();
+      if (run === generation) scheduleRetry();
+      throw err;
     }
 
     // Replay queued events (only new sensors will be added, existing ones are skipped)
@@ -625,11 +659,12 @@ export function createSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevi
       handleGlobalSensorEvent(msg);
     }
 
+    retryDelay = INIT_RETRY_MIN_MS;
     initialized.value = true;
   }
 
   function launchInit(): Promise<void> {
-    const p = doInit().finally(() => {
+    const p = doInit(generation).finally(() => {
       if (initPromise === p) initPromise = undefined;
     });
     initPromise = p;
@@ -653,9 +688,10 @@ export function createSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevi
       // (dead) client. Queue a fresh init behind it so the sensor
       // subscriptions land on the current client.
       const current = initPromise;
+      const run = generation;
       const p = current
         .catch(() => {})
-        .then(() => doInit())
+        .then(() => doInit(run))
         .finally(() => {
           if (initPromise === p) initPromise = undefined;
         });
@@ -666,15 +702,10 @@ export function createSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevi
   }
 
   function close(): void {
-    globalUnsubscribe?.();
-    globalUnsubscribe = undefined;
-
-    for (const unsubscribe of sensorSubscriptions.values()) {
-      unsubscribe();
-    }
-    sensorSubscriptions.clear();
-
-    sensorMap.value.clear();
+    generation++;
+    clearTimeout(retryTimer);
+    retryTimer = undefined;
+    dropSubscriptions();
     initialized.value = false;
     initPromise = undefined;
   }
@@ -710,7 +741,6 @@ export function createSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevi
 
 interface CachedSensorManager {
   manager: ReactiveSensorManager;
-  initPromise?: Promise<void>;
 }
 
 const sensorManagerCache = createDebouncedCache<CachedSensorManager>({
@@ -724,7 +754,7 @@ export function clearSensorCache(): void {
 
 export function reconnectAllSensorManagers(): void {
   sensorManagerCache.forEachValue((cached) => {
-    cached.initPromise = cached.manager.reconnect();
+    cached.manager.reconnect().catch(() => {});
   });
 }
 
@@ -791,32 +821,43 @@ async function ensureSensorManager(
   error.value = undefined;
 
   try {
-    // Pass the cameraUiContext so the cached manager dynamically resolves
-    // the current client — survives a race-winner adoption / endpoint swap.
-    const cached = acquireSensorManager(cameraUi);
-    state.acquired = true;
-    state.cachedManager = cached.manager;
-
-    if (!cached.initPromise) {
-      cached.initPromise = cached.manager.ensureInitialized();
+    // watch reruns reuse the reference, a cleared cache needs a new one
+    if (!holdsCachedManager(state)) {
+      // Pass the cameraUiContext so the cached manager dynamically resolves
+      // the current client, so it survives a race-winner adoption / endpoint swap.
+      state.cachedManager = acquireSensorManager(cameraUi).manager;
+      state.acquired = true;
     }
-    await cached.initPromise;
 
-    return cached.manager;
+    await state.cachedManager?.ensureInitialized();
   } catch (err) {
     error.value = err instanceof Error ? err : new Error(String(err));
-    return undefined;
   } finally {
     isLoading.value = false;
   }
+
+  // a failed init keeps the caller bound while the manager retries; a release during the await leaves it unbound
+  return state.cachedManager;
+}
+
+function clearErrorOnRecovery(manager: Ref<ReactiveSensorManager | undefined>, error: Ref<Error | undefined>): void {
+  watch(
+    () => manager.value?.isInitialized.value,
+    (ready) => {
+      if (ready) error.value = undefined;
+    },
+  );
+}
+
+function holdsCachedManager(state: SensorComposableState): boolean {
+  return state.acquired && sensorManagerCache.get(GLOBAL_SENSOR_MANAGER_KEY)?.manager === state.cachedManager;
 }
 
 function cleanupSensorComposable(state: SensorComposableState): void {
-  if (state.acquired) {
-    releaseSensorManager();
-    state.acquired = false;
-    state.cachedManager = undefined;
-  }
+  // after clearSensorCache the reference belongs to a closed manager, releasing it would drop a newer one
+  if (holdsCachedManager(state)) releaseSensorManager();
+  state.acquired = false;
+  state.cachedManager = undefined;
 }
 
 export function useSensorById(camera: CameraIdentifier, sensorId: MaybeRefOrGetter<string | undefined>): UseSensorReturn {
@@ -922,6 +963,8 @@ export function useSensorsByType(camera: CameraIdentifier, sensorType: MaybeRefO
     return sensorsForCamera(cachedManager.value, camId).filter((s) => s.type === type);
   });
 
+  clearErrorOnRecovery(cachedManager, error);
+
   tryOnScopeDispose(() => {
     cleanupSensorComposable(state);
     sensorsRef.value = [];
@@ -964,6 +1007,8 @@ export function useSensors(camera: CameraIdentifier): UseSensorsReturn {
     return sensorsForCamera(cachedManager.value, camId);
   });
 
+  clearErrorOnRecovery(cachedManager, error);
+
   tryOnScopeDispose(() => {
     cleanupSensorComposable(state);
     sensorsRef.value = [];
@@ -996,6 +1041,8 @@ export function useAllSensors(): UseSensorsReturn {
   );
 
   const sensors = computed(() => cachedManager.value?.sensors.value ?? []);
+
+  clearErrorOnRecovery(cachedManager, error);
 
   tryOnScopeDispose(() => {
     cleanupSensorComposable(state);
@@ -1061,6 +1108,8 @@ function useTypedSensor<T extends ReactiveSensor<any>>(
       }
     },
   );
+
+  clearErrorOnRecovery(cachedManager, error);
 
   tryOnScopeDispose(() => {
     cleanupSensorComposable(state);
@@ -1130,6 +1179,8 @@ export function useClassifierSensors(camera: CameraIdentifier): UseSensorsTypedR
     if (!camId) return [] as ReactiveClassifierSensor[];
     return sensorsForCamera(cachedManager.value, camId).filter((s) => s.type === SensorType.Classifier) as unknown as ReactiveClassifierSensor[];
   });
+
+  clearErrorOnRecovery(cachedManager, error);
 
   tryOnScopeDispose(() => {
     cleanupSensorComposable(state);
