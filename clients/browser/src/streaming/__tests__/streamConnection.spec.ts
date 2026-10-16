@@ -1361,7 +1361,7 @@ describe('StreamConnection probe', () => {
     const { conn, ws, probeStream, scope } = setup({ mode: 'auto' });
     probeStream.mockReturnValue(new Promise(() => {}));
 
-    void conn.start();
+    conn.start();
     await settle();
     ws.handles[0].serverOpen();
     await settle();
@@ -1461,7 +1461,7 @@ describe('StreamConnection probe', () => {
     const { conn, ws, probeStream, scope } = setup();
     const probe = pending<ProbeStream>();
     probeStream.mockReturnValueOnce(probe.promise);
-    void conn.start();
+    conn.start();
     await vi.advanceTimersByTimeAsync(2_000);
 
     ws.handles[0].serverClose(1006);

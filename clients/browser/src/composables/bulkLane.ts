@@ -38,7 +38,7 @@ export function markBulkDead(lane: BulkLane, client: RPCClient): void {
 // the caller already has its error, it never waits for the probe
 export function noticeBulkTimeout(lane: BulkLane, client: RPCClient): void {
   if (lane.value !== client || deadMarks.has(lane)) return;
-  void probeBulkClient(client).then((alive) => {
+  probeBulkClient(client).then((alive) => {
     if (!alive) markBulkDead(lane, client);
   });
 }
@@ -48,7 +48,7 @@ export function probeBulkClient(client: RPCClient): Promise<boolean> {
   if (!alive) {
     alive = answersPing(client);
     runningProbes.set(client, alive);
-    void alive.then(() => runningProbes.delete(client));
+    alive.then(() => runningProbes.delete(client));
   }
   return alive;
 }
@@ -63,7 +63,7 @@ async function answersPing(client: RPCClient): Promise<boolean> {
 }
 
 function recheck(lane: BulkLane, mark: DeadMark): void {
-  void probeBulkClient(mark.client).then((alive) => {
+  probeBulkClient(mark.client).then((alive) => {
     if (deadMarks.get(lane) !== mark) return;
     if (alive) clearMark(lane);
     else mark.since = performance.now();

@@ -528,11 +528,11 @@ describe('createReactiveCameraDevice state refresh', () => {
     controller.refreshStates.mockImplementationOnce(() => new Promise((_resolve, reject) => setTimeout(() => reject(timeout()), 10_000)));
     controller.refreshStates.mockResolvedValueOnce(state(false));
 
-    void device.refreshStates().catch(() => {});
+    device.refreshStates().catch(() => {});
     await vi.advanceTimersByTimeAsync(100);
     rpc.value = undefined;
     rpc.value = client;
-    void device.refreshStates();
+    device.refreshStates();
     await vi.advanceTimersByTimeAsync(100);
 
     expect(controller.refreshStates).toHaveBeenCalledTimes(2);

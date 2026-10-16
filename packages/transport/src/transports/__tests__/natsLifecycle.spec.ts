@@ -143,7 +143,7 @@ describe('nats transport: connecting', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
     onDial = (c) => c.refuse(closeError(4500));
     const t = make();
-    void t.apply(A).catch(() => {});
+    t.apply(A).catch(() => {});
     await vi.advanceTimersByTimeAsync(0);
     expect(clients).toHaveLength(1);
     expect(t.health()).toMatchObject({ up: false });
@@ -181,7 +181,7 @@ describe('nats transport: connecting', () => {
     vi.useFakeTimers();
     onDial = (c) => c.refuse(closeError(4500));
     const t = make();
-    void t.apply(A).catch(() => {});
+    t.apply(A).catch(() => {});
     await vi.advanceTimersByTimeAsync(0);
     await t.dispose();
     expect(vi.getTimerCount()).toBe(0);
@@ -194,7 +194,7 @@ describe('nats transport: connecting', () => {
     vi.useFakeTimers();
     onDial = (c) => c.refuse(closeError(4500));
     const t = make();
-    void t.apply(A).catch(() => {});
+    t.apply(A).catch(() => {});
     await vi.advanceTimersByTimeAsync(0);
     await t.apply(null);
     expect(vi.getTimerCount()).toBe(0);
@@ -476,7 +476,7 @@ describe('nats transport: endpoint swap and resign', () => {
     t.on('down', ({ reason }) => downs.push(reason));
 
     onDial = () => {};
-    void t.apply(B);
+    t.apply(B);
     await vi.waitFor(() => expect(clients).toHaveLength(2));
 
     expect(t.health().up).toBe(false);
@@ -626,7 +626,7 @@ describe('nats transport: ensureAlive', () => {
   it('waits for a dial that just started instead of starting another', async () => {
     vi.useFakeTimers();
     const t = make();
-    void t.apply(A).catch(() => {});
+    t.apply(A).catch(() => {});
     await vi.advanceTimersByTimeAsync(300);
     const first = last();
 
@@ -642,7 +642,7 @@ describe('nats transport: ensureAlive', () => {
   it('replaces a dial that has been hanging for a while', async () => {
     vi.useFakeTimers();
     const t = make();
-    void t.apply(A).catch(() => {});
+    t.apply(A).catch(() => {});
     await vi.advanceTimersByTimeAsync(3_000);
     const hanging = last();
 
@@ -657,7 +657,7 @@ describe('nats transport: ensureAlive', () => {
     vi.spyOn(Math, 'random').mockReturnValue(0.5);
     onDial = (c) => c.refuse(closeError(4500));
     const t = make();
-    void t.apply(A).catch(() => {});
+    t.apply(A).catch(() => {});
     await vi.advanceTimersByTimeAsync(0);
     expect(clients).toHaveLength(1);
 
@@ -670,7 +670,7 @@ describe('nats transport: ensureAlive', () => {
     vi.useFakeTimers();
     onDial = (c) => c.refuse(closeError(4500));
     const t = make();
-    void t.apply(A).catch(() => {});
+    t.apply(A).catch(() => {});
     await vi.advanceTimersByTimeAsync(3_000);
 
     await expect(t.ensureAlive()).resolves.toMatchObject({ up: false });

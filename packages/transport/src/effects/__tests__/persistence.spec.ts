@@ -215,7 +215,7 @@ describe('attachPersistence — async storage', () => {
       const kernel = createKernel({ context: makeCtx() });
       const persistence = attachPersistence({ kernel, storage });
       let settled = false;
-      void persistence.ready.then(() => (settled = true));
+      persistence.ready.then(() => (settled = true));
 
       await vi.advanceTimersByTimeAsync(2_999);
       expect(settled).toBe(false);
@@ -261,8 +261,8 @@ describe('localStorageAdapter', () => {
     const items = new Map<string, string>();
     const scope = {
       getItem: (k: string) => items.get(k) ?? null,
-      setItem: (k: string, v: string) => void items.set(k, v),
-      removeItem: (k: string) => void items.delete(k),
+      setItem: (k: string, v: string) => items.set(k, v),
+      removeItem: (k: string) => items.delete(k),
     } as unknown as Storage;
     const storage = localStorageAdapter(scope);
     storage.set('k', 'v');

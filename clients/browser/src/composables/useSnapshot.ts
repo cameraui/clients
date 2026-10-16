@@ -72,7 +72,7 @@ function hookReconnectRefresh(cameraUi: ReturnType<typeof useCameraUi>, deviceMa
         const cameraId = id;
         setTimeout(() => {
           if ((subscribers.get(cameraId)?.size ?? 0) === 0) return;
-          void fetchSnapshotShared(deviceManager, cameraId).catch(() => undefined);
+          fetchSnapshotShared(deviceManager, cameraId).catch(() => undefined);
         }, delay);
         delay += 150;
       }
@@ -247,7 +247,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     if (disposed) return;
     holdRetry.schedule(() => {
       if (!isConnected.value || currentId() !== id || isCameraDisabled(toValue(cameraIdOrName))) return;
-      void holdDevice(id).then(() => {
+      holdDevice(id).then(() => {
         // the load after the failed hold found no device either
         if (heldDeviceId === id) return loadSnapshot(id);
       });

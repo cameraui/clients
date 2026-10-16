@@ -364,7 +364,7 @@ describe('createHttpTransport: 401 hold follows the token refresh', () => {
       event.holdFor?.(
         new Promise<boolean>((resolve) =>
           setTimeout(() => {
-            void t.apply(T1b);
+            t.apply(T1b);
             resolve(true);
           }, 20),
         ),
@@ -428,7 +428,7 @@ describe('createHttpTransport: 401 hold follows the token refresh', () => {
         new Promise<boolean>((resolve) =>
           setTimeout(() => {
             ac.abort();
-            void t.apply(T1b);
+            t.apply(T1b);
             resolve(true);
           }, 10),
         ),

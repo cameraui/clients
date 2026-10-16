@@ -397,7 +397,7 @@ export class StreamConnection implements ReactiveStream {
         // the runtime net catch a wrong guess
         if (!probe || this.source.value?._id === probedSourceId) break;
       }
-      if (this.source.value?._id !== dialedSourceId) void this.dialWithProbe();
+      if (this.source.value?._id !== dialedSourceId) this.dialWithProbe();
     } catch (err) {
       if (gen !== this.connectionGeneration) return;
       log.debug('start() — error:', err);
@@ -578,7 +578,7 @@ export class StreamConnection implements ReactiveStream {
         this.status.value = 'error';
         return;
       }
-      void this.dialWithProbe();
+      this.dialWithProbe();
     } catch (err) {
       if (gen !== this.connectionGeneration) return;
       this.error.value = err instanceof Error ? err : new Error(String(err));

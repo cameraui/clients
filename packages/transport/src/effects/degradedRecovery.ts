@@ -102,7 +102,7 @@ export function attachDegradedRecovery(options: DegradedRecoveryOptions): Detach
     }
     if (round === 0 && lostWanTarget()) {
       disarm();
-      void escalate();
+      escalate();
     } else arm();
   }
 
