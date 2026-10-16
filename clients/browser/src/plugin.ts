@@ -1,13 +1,14 @@
 import { Logger } from '@camera.ui/logger';
 import { computed, markRaw, readonly, ref, shallowRef } from 'vue';
 
-import { refreshClientSubscriptions } from './composables/resetClientState.js';
+import { refreshClientStates, refreshClientSubscriptions } from './composables/resetClientState.js';
+import { markLinkRestored } from './composables/useRpc.js';
 
 import type { RPCClient } from '@camera.ui/rpc';
 import type { ConnectionTarget } from '@camera.ui/transport';
 import type { NatsTransport } from '@camera.ui/transport/transports/nats';
 import type { WsTransport } from '@camera.ui/transport/transports/ws';
-import type { InjectionKey, Ref } from 'vue';
+import type { InjectionKey, Ref, ShallowRef } from 'vue';
 import type { CameraUiContext, CameraUiEventCallback, CameraUiEventType } from './types.js';
 
 export const CAMERA_UI_INJECTION_KEY: InjectionKey<CameraUiContext> = Symbol('camera-ui');
@@ -16,6 +17,7 @@ const log = new Logger('plugin');
 
 export interface CameraUiPluginInput {
   natsTransport: NatsTransport;
+  bulkTransport?: NatsTransport;
   target: Ref<ConnectionTarget | null>;
   wsTransport?: WsTransport;
 }
@@ -27,7 +29,7 @@ function isContext(input: CameraUiContext | CameraUiPluginInput): input is Camer
 const DOWN_DEBOUNCE_MS = 4_000;
 
 function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
-  const { natsTransport, target, wsTransport } = input;
+  const { natsTransport, bulkTransport, target, wsTransport } = input;
 
   let hasBeenConnected = natsTransport.getClient() !== null;
   let lastClient: RPCClient | null = natsTransport.getClient();
@@ -40,11 +42,7 @@ function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
 
   const endpoint = computed(() => target.value?.endpoint.url);
   const token = computed(() => target.value?.tokens.access);
-  const extraProxyQuery = computed<Record<string, string> | undefined>(() => {
-    const t = target.value;
-    if (!t?.tokens.proxySession) return undefined;
-    return { session: t.tokens.proxySession };
-  });
+  const extraProxyQuery = computed<Record<string, string> | undefined>(() => undefined);
 
   const listeners = new Map<CameraUiEventType, Set<CameraUiEventCallback>>();
 
@@ -91,11 +89,13 @@ function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
       // connId-fresh. NATS core is at-most-once though: messages published
       // during ANY gap are gone, so even the blip must emit 'reconnected' for
       // data consumers to backfill.
+      if (hasBeenConnected && (!wasConnected || clientChanged || sawDrop)) markLinkRestored(rpc);
       if (!wasConnected || clientChanged) {
         refreshClientSubscriptions();
         if (hasBeenConnected) emit('reconnected');
         hasBeenConnected = true;
       } else if (sawDrop && hasBeenConnected) {
+        refreshClientStates();
         emit('reconnected');
       }
       sawDrop = false;
@@ -129,8 +129,18 @@ function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
     error.value = undefined;
   });
 
+  let bulkRpc: ShallowRef<RPCClient | undefined> | undefined;
+  if (bulkTransport) {
+    const lane = shallowRef<RPCClient | undefined>();
+    bulkTransport.subscribeClient((next) => {
+      lane.value = next ?? undefined;
+    });
+    bulkRpc = lane;
+  }
+
   return markRaw({
     rpc,
+    bulkRpc,
     target: readonly(target) as Readonly<Ref<ConnectionTarget | null>>,
     isConnected: readonly(isConnected),
     endpoint,

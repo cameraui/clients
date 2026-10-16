@@ -2,8 +2,10 @@ import { SensorType } from '@camera.ui/sdk';
 import { computed, ref, shallowRef } from 'vue';
 
 import { NamespaceManager } from '../server/index.js';
-import { rpcCall } from './useRpc.js';
-import { getSnapshot, setSnapshot, subscribeSnapshot } from './useSnapshot.js';
+import { createRetryTimer } from '../utils/createRetryTimer.js';
+import { liveBulkClient, markBulkDead, probeBulkClient } from './bulkLane.js';
+import { isLinkSettling, isLocalNoResponders, rpcCall } from './useRpc.js';
+import { getSnapshot, getSnapshotStamp, setSnapshot, subscribeSnapshot } from './useSnapshot.js';
 
 import type { RPCClient } from '@camera.ui/rpc';
 import type { Camera, CameraInput, CameraSource, ProbeConfig, ProbeStream } from '@camera.ui/sdk';
@@ -18,12 +20,12 @@ import type {
   SensorConnectedChangedEvent,
   SensorDeletedEvent,
   SensorRefreshedState,
-  SensorRegistryNamespaces,
 } from '../server/index.js';
 import type { ReactiveCameraDevice } from '../types.js';
 
 export interface ReactiveCameraDeviceContext {
   rpc: ShallowRef<RPCClient | undefined>;
+  bulkRpc?: ShallowRef<RPCClient | undefined>;
 }
 
 interface GlobalSensorEventMessage {
@@ -31,16 +33,43 @@ interface GlobalSensorEventMessage {
   data: SensorAddedEvent | SensorDeletedEvent | SensorConnectedChangedEvent | SensorAssignmentChangedEvent;
 }
 
+type SensorEventHandler = (event: GlobalSensorEventMessage) => void;
+
+interface SensorEventFanout {
+  handlers: Set<SensorEventHandler>;
+  subscribed: Promise<() => void>;
+}
+
+interface FetchedSnapshot {
+  data: ArrayBuffer;
+  fetchedAt: number | undefined;
+  stamp?: number;
+}
+
+const NOT_MODIFIED = 'not-modified';
+
+const snapshotWithMetaSupport = new WeakMap<RPCClient, boolean>();
+const sensorEventFanouts = new WeakMap<RPCClient, SensorEventFanout>();
+
 export async function createReactiveCameraDevice(rpcOrContext: RPCClient | ReactiveCameraDeviceContext, initialCamera: Camera): Promise<ReactiveCameraDevice> {
   const cameraNamespaces: CameraNamespaces = NamespaceManager.cameraNamespaces(initialCamera._id);
-  const sensorNamespaces: SensorRegistryNamespaces = NamespaceManager.sensorRegistryNamespaces();
 
   const ctx: ReactiveCameraDeviceContext | undefined =
     'rpc' in rpcOrContext && 'value' in (rpcOrContext as ReactiveCameraDeviceContext).rpc ? (rpcOrContext as ReactiveCameraDeviceContext) : undefined;
   const rpcRef: ShallowRef<RPCClient | undefined> = ctx ? (ctx.rpc as ShallowRef<RPCClient | undefined>) : shallowRef<RPCClient | undefined>(rpcOrContext as RPCClient);
+  const bulkRpc = ctx?.bulkRpc;
 
   let closeSubscription: (() => void) | undefined;
   let closeSensorSubscription: (() => void) | undefined;
+  let closed = false;
+  let reconnecting: Promise<void> | undefined;
+  let reconnectAgain = false;
+  const reconnectRetry = createRetryTimer();
+  let statesSeq = 0;
+  let appliedStatesSeq = 0;
+  let statesRun: Promise<void> | undefined;
+  let statesNext: Promise<void> | undefined;
+  let sensorRefreshQueued = false;
 
   const camera = shallowRef(initialCamera);
   const connected = ref(false);
@@ -96,44 +125,149 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
 
   async function fetchSnapshot(sourceId: string, forceNew?: boolean): Promise<ArrayBuffer | undefined> {
     snapshotLoading.value = true;
+    const requestedAt = Date.now();
     try {
-      try {
-        const result = await rpcCall(rpcRef, (client) =>
-          client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).snapshotWithMeta(sourceId, forceNew),
-        );
-        if (result && result.data.byteLength > 0) {
-          setSnapshot(initialCamera._id, result.data, Date.now() - result.ageMs);
-          return result.data;
-        }
-        return undefined;
-      } catch {
-        // Older servers don't expose snapshotWithMeta — fall back to the legacy
-        // call, where only forced fetches have a known fetch time.
-        const result = await rpcCall(rpcRef, (client) => client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).snapshot(sourceId, forceNew));
-        if (result && result.byteLength > 0) {
-          setSnapshot(initialCamera._id, result, forceNew ? Date.now() : undefined);
-          return result;
-        }
+      const result = await requestSnapshot(sourceId, forceNew);
+      if (result === NOT_MODIFIED) return getSnapshot(initialCamera._id);
+      if (result && result.data.byteLength > 0) {
+        const stamp = result.stamp === undefined ? undefined : { sourceId, fetchedAt: result.stamp };
+        // a reply of unknown age counts as taken when it was asked for
+        setSnapshot(initialCamera._id, result.data, result.fetchedAt, result.fetchedAt ?? requestedAt, stamp);
+        return result.data;
       }
+      return undefined;
     } finally {
       snapshotLoading.value = false;
     }
   }
 
+  async function requestSnapshot(sourceId: string, forceNew?: boolean): Promise<FetchedSnapshot | typeof NOT_MODIFIED | undefined> {
+    let lastClient: RPCClient | undefined;
+    let bulkDead = false;
+    try {
+      // a timed out attempt keeps running on the server and fills its cache for the next one
+      return await rpcCall(
+        rpcRef,
+        async (client) => {
+          lastClient = snapshotClient(client, bulkDead);
+          try {
+            return await snapshotFrom(lastClient, sourceId, forceNew);
+          } catch (err) {
+            // a dead bulk connection stays marked up until its own ping notices, main takes over until it reconnects or answers again
+            if (!bulkRpc || lastClient === client || (err as { code?: unknown }).code !== 'TIMEOUT' || (await probeBulkClient(lastClient))) throw err;
+            bulkDead = true;
+            markBulkDead(bulkRpc, lastClient);
+            lastClient = client;
+            return snapshotFrom(client, sourceId, forceNew);
+          }
+        },
+        { retryOnTimeout: !forceNew },
+      );
+    } catch (err) {
+      // servers that have snapshotWithMeta but keep it from viewers only let it time out
+      if ((err as { code?: unknown }).code !== 'TIMEOUT' || !lastClient || snapshotWithMetaSupport.has(lastClient)) throw err;
+      return rpcCall(rpcRef, (client) => legacySnapshotFrom(snapshotClient(client, bulkDead), sourceId, forceNew));
+    }
+  }
+
+  function snapshotClient(client: RPCClient, mainOnly = false): RPCClient {
+    return mainOnly ? client : (liveBulkClient(bulkRpc) ?? client);
+  }
+
+  async function snapshotFrom(client: RPCClient, sourceId: string, forceNew?: boolean): Promise<FetchedSnapshot | typeof NOT_MODIFIED | undefined> {
+    const supported = snapshotWithMetaSupport.get(client);
+    if (supported === false) return legacySnapshotFrom(client, sourceId, forceNew);
+    try {
+      const controller = client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc);
+      const known = forceNew ? undefined : getSnapshotStamp(initialCamera._id, sourceId);
+      const result = known === undefined ? await controller.snapshotWithMeta(sourceId, forceNew) : await controller.snapshotWithMeta(sourceId, forceNew, known);
+      snapshotWithMetaSupport.set(client, true);
+      if (result?.notModified) return NOT_MODIFIED;
+      return result?.data ? { data: result.data, fetchedAt: Date.now() - (result.ageMs ?? 0), stamp: result.fetchedAt } : undefined;
+    } catch (err) {
+      if ((err as { code?: unknown }).code === 'METHOD_NOT_FOUND') {
+        snapshotWithMetaSupport.set(client, false);
+        return legacySnapshotFrom(client, sourceId, forceNew);
+      }
+      // servers before snapshotWithMeta have no responder for it, a server that answered it once only had a blip
+      if (supported || !isLocalNoResponders(err)) throw err;
+    }
+    const result = await legacySnapshotFrom(client, sourceId, forceNew);
+    // a restarted server registers its cameras one by one, a missing responder then says nothing about the method
+    if (!isLinkSettling(rpcRef)) snapshotWithMetaSupport.set(client, false);
+    return result;
+  }
+
+  async function legacySnapshotFrom(client: RPCClient, sourceId: string, forceNew?: boolean): Promise<FetchedSnapshot | undefined> {
+    const data = await client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).snapshot(sourceId, forceNew);
+    // only forced fetches have a known fetch time here
+    return data ? { data, fetchedAt: forceNew ? Date.now() : undefined } : undefined;
+  }
+
   async function probeStream(sourceId: string, probeConfig?: ProbeConfig, refresh = false): Promise<ProbeStream | undefined> {
-    return rpcCall(rpcRef, (client) => client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).probeStream(sourceId, probeConfig, refresh));
+    return rpcCall(rpcRef, (client) => client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).probeStream(sourceId, probeConfig, refresh), {
+      retryOnTimeout: !refresh,
+    });
   }
 
   async function streamUrl(sourceId: string): Promise<string | undefined> {
     return rpcCall(rpcRef, (client) => client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).streamUrl(sourceId));
   }
 
-  async function refreshStates(): Promise<void> {
+  function refreshStates(): Promise<void> {
+    statesNext = undefined;
+    return startStatesRun();
+  }
+
+  function refreshStatesCoalesced(): Promise<void> {
+    if (statesNext) return statesNext;
+    if (!statesRun) return startStatesRun();
+    const queuedAt = statesSeq;
+    statesNext = statesRun
+      .catch(() => {})
+      .then(() => {
+        // a call started since then already covers these callers
+        if (statesSeq !== queuedAt) return statesRun;
+        statesNext = undefined;
+        return startStatesRun();
+      });
+    return statesNext;
+  }
+
+  function startStatesRun(): Promise<void> {
+    const run = fetchStates(++statesSeq).finally(() => {
+      if (statesRun === run) statesRun = undefined;
+    });
+    statesRun = run;
+    return run;
+  }
+
+  async function fetchStates(seq: number): Promise<void> {
     const response: RefreshedStates = await rpcCall(rpcRef, (client) => client.createProxy<CameraDeviceInterface>(cameraNamespaces.cameraControllerRpc).refreshStates());
+    // the answer to a later call is already on screen
+    if (seq < appliedStatesSeq) return;
+    appliedStatesSeq = seq;
     camera.value = response.camera;
     connected.value = response.cameraState;
     frameWorkerConnected.value = response.frameWorkerState;
     sensorStates.value = response.sensorStates;
+  }
+
+  // a plugin restart reconnects all its sensors at once, their events arrive in one task
+  function refreshForSensors(): void {
+    if (sensorRefreshQueued || closed) return;
+    sensorRefreshQueued = true;
+    queueMicrotask(() => {
+      sensorRefreshQueued = false;
+      if (!closed) refreshStatesCoalesced().catch(() => {});
+    });
+  }
+
+  function dropSensorState(sensorId: string): void {
+    if (sensorStates.value[sensorId] === undefined) return;
+    const newStates = { ...sensorStates.value };
+    delete newStates[sensorId];
+    sensorStates.value = newStates;
   }
 
   async function handleCameraEvent(event: CameraDeviceListenerMessagePayload): Promise<void> {
@@ -150,9 +284,11 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
       case 'frameWorkerState':
         frameWorkerConnected.value = event.data;
         break;
-      case 'snapshot:updated':
-        setSnapshot(initialCamera._id, event.data.snapshot, event.data.fetchedAt);
+      case 'snapshot:updated': {
+        const { sourceId, snapshot: data, fetchedAt } = event.data;
+        setSnapshot(initialCamera._id, data, fetchedAt, undefined, sourceId && fetchedAt !== undefined ? { sourceId, fetchedAt } : undefined);
         break;
+      }
     }
   }
 
@@ -166,45 +302,88 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
         [addedEvent.sensor.id]: addedEvent.state,
       };
     } else if (event.type === 'sensor:deleted') {
-      const deletedEvent = event.data as SensorDeletedEvent;
-      const newStates = { ...sensorStates.value };
-      delete newStates[deletedEvent.sensorId];
-      sensorStates.value = newStates;
+      dropSensorState((event.data as SensorDeletedEvent).sensorId);
     } else if (event.type === 'sensor:connected:changed') {
       const connectedEvent = event.data as SensorConnectedChangedEvent;
       if (connectedEvent.connected) {
+        if (connectedEvent.assignedCameraIds && !connectedEvent.assignedCameraIds.includes(initialCamera._id)) return;
         // connect events carry no state, refetch the camera's sensor set
-        refreshStates().catch(() => {});
+        refreshForSensors();
       } else {
-        const newStates = { ...sensorStates.value };
-        delete newStates[connectedEvent.sensorId];
-        sensorStates.value = newStates;
+        dropSensorState(connectedEvent.sensorId);
       }
     } else if (event.type === 'sensor:assignment:changed') {
       const assignmentEvent = event.data as SensorAssignmentChangedEvent;
       if (assignmentEvent.cameraId !== initialCamera._id) return;
       if (assignmentEvent.assigned) {
         // assignment events carry no state, refetch the camera's sensor set
-        refreshStates().catch(() => {});
+        refreshForSensors();
       } else {
-        const newStates = { ...sensorStates.value };
-        delete newStates[assignmentEvent.sensorId];
-        sensorStates.value = newStates;
+        dropSensorState(assignmentEvent.sensorId);
       }
     }
   }
 
   async function init(): Promise<void> {
     closeSubscription?.();
+    closeSubscription = undefined;
     closeSensorSubscription?.();
+    closeSensorSubscription = undefined;
 
-    closeSubscription = await rpcCall(rpcRef, (client) => client.subscribe<CameraDeviceListenerMessagePayload>(cameraNamespaces.cameraSubject, handleCameraEvent));
-    closeSensorSubscription = await rpcCall(rpcRef, (client) => client.subscribe<GlobalSensorEventMessage>(sensorNamespaces.sensorsSubject, handleSensorEvent));
+    const cameraSubscription = await rpcCall(rpcRef, (client) => client.subscribe<CameraDeviceListenerMessagePayload>(cameraNamespaces.cameraSubject, handleCameraEvent));
+    if (closed) {
+      cameraSubscription();
+      return;
+    }
+    closeSubscription = cameraSubscription;
+    const sensorSubscription = await rpcCall(rpcRef, (client) => joinSensorEvents(client, handleSensorEvent));
+    if (closed) {
+      sensorSubscription();
+      return;
+    }
+    closeSensorSubscription = sensorSubscription;
 
     await refreshStates();
   }
 
+  function reconnect(): Promise<void> {
+    if (closed) return Promise.resolve();
+    reconnectRetry.cancel();
+    if (reconnecting) {
+      reconnectAgain = true;
+      return reconnecting;
+    }
+    reconnecting = runReconnect();
+    return reconnecting;
+  }
+
+  async function runReconnect(): Promise<void> {
+    try {
+      do {
+        reconnectAgain = false;
+        await init();
+      } while (reconnectAgain && !closed);
+      reconnectRetry.reset();
+    } catch (err) {
+      // without a retry a camera that failed here keeps a stale state, or no event subscriptions at all
+      scheduleReconnect();
+      throw err;
+    } finally {
+      reconnecting = undefined;
+    }
+  }
+
+  function scheduleReconnect(): void {
+    if (closed) return;
+    reconnectRetry.schedule(() => {
+      reconnect().catch(() => {});
+    });
+  }
+
   async function close(): Promise<void> {
+    closed = true;
+    reconnectRetry.cancel();
+
     closeSubscription?.();
     closeSubscription = undefined;
 
@@ -275,7 +454,44 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
     probeStream: probeStreamFn,
     streamUrl,
     refreshStates,
-    reconnect: init,
+    reconnect,
     close,
   };
+}
+
+async function joinSensorEvents(client: RPCClient, handler: SensorEventHandler): Promise<() => void> {
+  let fanout = sensorEventFanouts.get(client);
+  if (!fanout) {
+    const handlers = new Set<SensorEventHandler>();
+    const subject = NamespaceManager.sensorRegistryNamespaces().sensorsSubject;
+    fanout = {
+      handlers,
+      subscribed: client.subscribe<GlobalSensorEventMessage>(subject, (event) => {
+        for (const each of handlers) {
+          try {
+            each(event);
+          } catch {
+            // one camera's handler must not cost the others the event
+          }
+        }
+      }),
+    };
+    sensorEventFanouts.set(client, fanout);
+  }
+  const joined = fanout;
+  joined.handlers.add(handler);
+  try {
+    await joined.subscribed;
+  } catch (err) {
+    joined.handlers.delete(handler);
+    if (sensorEventFanouts.get(client) === joined) sensorEventFanouts.delete(client);
+    throw err;
+  }
+  return () => leaveSensorEvents(client, joined, handler);
+}
+
+function leaveSensorEvents(client: RPCClient, fanout: SensorEventFanout, handler: SensorEventHandler): void {
+  if (!fanout.handlers.delete(handler) || fanout.handlers.size > 0) return;
+  if (sensorEventFanouts.get(client) === fanout) sensorEventFanouts.delete(client);
+  fanout.subscribed.then((off) => off()).catch(() => {});
 }

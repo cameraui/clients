@@ -25,6 +25,14 @@ export function isMobile(): boolean {
   return /iPhone|iPad|iPod|Android/i.test(navigator.userAgent);
 }
 
+export function suspendsWhenHidden(): boolean {
+  const capacitor = (globalThis as { Capacitor?: { isNativePlatform?: () => boolean } }).Capacitor;
+  if (capacitor?.isNativePlatform?.()) return true;
+  if (typeof navigator === 'undefined') return false;
+  // iPadOS reports a desktop Safari user agent
+  return isMobile() || (/Macintosh/i.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+}
+
 export function getSupportedCodecs(): string[] {
   const codecs = [...STREAM_CONFIG.CODECS.DEFAULT];
 
@@ -160,6 +168,14 @@ export function getMediaSourceConstructor(): typeof MediaSource | undefined {
     return window.MediaSource;
   }
   return undefined;
+}
+
+export function isVideoInPictureInPicture(video: HTMLVideoElement | undefined | null): boolean {
+  if (!video) return false;
+  if (typeof document !== 'undefined' && 'pictureInPictureElement' in document && document.pictureInPictureElement === video) {
+    return true;
+  }
+  return (video as { webkitPresentationMode?: string }).webkitPresentationMode === 'picture-in-picture';
 }
 
 export function sleep(ms: number): Promise<void> {

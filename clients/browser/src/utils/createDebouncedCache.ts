@@ -5,7 +5,7 @@ export interface DebouncedCacheOptions<T> {
 
 export interface DebouncedCache<T> {
   acquire(key: string, create: () => T): T;
-  release(key: string): void;
+  release(key: string, value?: T): void;
   get(key: string): T | undefined;
   has(key: string): boolean;
   forceRelease(key: string): void;
@@ -60,12 +60,13 @@ export function createDebouncedCache<T>(options: DebouncedCacheOptions<T> = {}):
     return value;
   }
 
-  function release(key: string): void {
+  function release(key: string, value?: T): void {
     const cached = cache.get(key);
-    if (!cached) return;
+    if (!cached || cached.refCount <= 0) return;
+    if (value !== undefined && cached.value !== value) return;
 
     cached.refCount--;
-    if (cached.refCount <= 0) {
+    if (cached.refCount === 0) {
       const timer = setTimeout(() => {
         const stillCached = cache.get(key);
         if (stillCached && stillCached.refCount <= 0) {

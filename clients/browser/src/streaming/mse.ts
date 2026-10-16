@@ -1,11 +1,14 @@
 import { STREAM_CONFIG } from './config.js';
+import { createFmp4KeyframeScanner } from './fmp4.js';
 import { filterSupportedCodecs, getMediaSourceConstructor, getSupportedCodecs, hasManagedMediaSource } from './utils.js';
+
+export type MSEErrorPhase = 'setup' | 'runtime';
 
 export interface MSEHandlerOptions {
   videoElement: HTMLVideoElement;
   onReady: () => void;
   onFirstData: () => void;
-  onError: (error: Error) => void;
+  onError: (error: Error, phase: MSEErrorPhase) => void;
   signal: AbortSignal;
 }
 
@@ -19,6 +22,11 @@ export interface MSEHandler {
   close: () => void;
 }
 
+const CUT_MARGIN = 0.001;
+const MAX_KEYFRAMES = 256;
+const LIVE_EDGE_MARGIN = 0.3;
+const PENDING_INITIAL_SIZE = 256 * 1024;
+
 export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
   const { videoElement, onReady, onFirstData, onError, signal } = options;
 
@@ -27,19 +35,22 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
   let objectUrl: string | null = null;
   let isReady = false;
   let hasFirstData = false;
+  let failed = false;
 
-  let pendingBuffer = new Uint8Array(STREAM_CONFIG.MSE.BUFFER_SIZE);
+  let pendingBuffer = new Uint8Array(0);
   let pendingLength = 0;
 
   const earlyDataBuffer: ArrayBuffer[] = [];
   const supportedCodecs = getSupportedCodecs();
+  const scanner = createFmp4KeyframeScanner();
+  const keyframes: number[] = [];
 
   function setup(): string | undefined {
     if (signal.aborted) return undefined;
 
     const MediaSourceConstructor = getMediaSourceConstructor();
     if (!MediaSourceConstructor) {
-      onError(new Error('MediaSource not supported'));
+      fail(new Error('MediaSource not supported'), 'setup');
       return undefined;
     }
 
@@ -67,6 +78,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
       videoElement.src = objectUrl;
       videoElement.srcObject = null;
     }
+    videoElement.addEventListener('error', handleVideoError);
 
     const codecs = filterSupportedCodecs(supportedCodecs, MediaSourceConstructor.isTypeSupported.bind(MediaSourceConstructor));
     return codecs;
@@ -89,11 +101,11 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
     }
 
     pendingLength = 0;
-    pendingBuffer = new Uint8Array(STREAM_CONFIG.MSE.BUFFER_SIZE);
+    keyframes.length = 0;
 
     const MediaSourceConstructor = getMediaSourceConstructor();
     if (MediaSourceConstructor && !MediaSourceConstructor.isTypeSupported(mimeType)) {
-      onError(new Error(`MIME type not supported: ${mimeType}`));
+      fail(new Error(`MIME type not supported: ${mimeType}`), 'setup');
       return;
     }
 
@@ -101,6 +113,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
       sourceBuffer = mediaSource.addSourceBuffer(mimeType);
       sourceBuffer.mode = 'segments';
       sourceBuffer.addEventListener('updateend', handleUpdateEnd);
+      sourceBuffer.addEventListener('error', handleSourceBufferError);
 
       isReady = true;
 
@@ -111,51 +124,64 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
         earlyDataBuffer.length = 0;
       }
 
+      if (failed || signal.aborted) return;
       onReady();
     } catch (err) {
-      onError(err instanceof Error ? err : new Error(String(err)));
+      fail(err, isReady ? 'runtime' : 'setup');
     }
   }
 
   function handleUpdateEnd(): void {
-    if (signal.aborted || !sourceBuffer || !mediaSource) return;
+    if (signal.aborted || failed || !sourceBuffer || !mediaSource) return;
 
     if (!sourceBuffer.updating && pendingLength > 0) {
       try {
-        const data = pendingBuffer.slice(0, pendingLength);
-        sourceBuffer.appendBuffer(data);
+        // appendBuffer copies synchronously, the queue can take new frames right after
+        sourceBuffer.appendBuffer(pendingBuffer.subarray(0, pendingLength));
         pendingLength = 0;
       } catch (err) {
         // A swallowed failure here would stall the pipeline permanently: no
         // new update → no updateend → the queue never drains again and every
         // incoming frame accumulates until overflow.
         if (!recoverFromQuota(err)) {
-          onError(err instanceof Error ? err : new Error(String(err)));
+          fail(err, 'runtime');
+          return;
         }
       }
     }
 
     if (!sourceBuffer.updating && sourceBuffer.buffered?.length) {
       const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-      const start = end - STREAM_CONFIG.MSE.BUFFER_WINDOW;
       const start0 = sourceBuffer.buffered.start(0);
+      const margin = STREAM_CONFIG.MSE.BUFFER_WINDOW;
 
       if (!hasFirstData) {
         hasFirstData = true;
         onFirstData();
       }
 
-      if (start > start0) {
+      let cut = cutPoint(Math.min(videoElement.currentTime, end) - margin);
+      if (end - start0 > STREAM_CONFIG.MSE.MAX_BUFFER_WINDOW) {
+        // a paused playhead or a stream without known keyframes must not grow the buffer forever
+        const keyframe = cutPoint(end - margin);
+        cut = keyframe !== undefined && keyframe > start0 + CUT_MARGIN ? keyframe : end - margin;
+      }
+
+      if (cut !== undefined && cut > start0 + CUT_MARGIN) {
         try {
-          sourceBuffer.remove(start0, start);
-          mediaSource.setLiveSeekableRange(start, end);
+          sourceBuffer.remove(start0, cut - CUT_MARGIN);
+          mediaSource.setLiveSeekableRange(cut, end);
         } catch {
           // Ignore errors
         }
+        forgetKeyframesBefore(cut);
       }
 
-      if (videoElement.currentTime < start) {
-        videoElement.currentTime = start;
+      if (videoElement.currentTime < end - margin) {
+        const target = seekPoint(end - margin, end);
+        if (target > videoElement.currentTime) {
+          videoElement.currentTime = target;
+        }
       }
 
       const gap = end - videoElement.currentTime;
@@ -170,30 +196,30 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
   }
 
   function appendBuffer(data: ArrayBuffer): void {
-    if (signal.aborted) return;
+    if (signal.aborted || failed) return;
 
     if (!sourceBuffer) {
       earlyDataBuffer.push(data);
       return;
     }
 
-    if (mediaSource?.readyState === 'closed') {
-      onError(new Error('MediaSource closed'));
+    // after a decode error the source is ended and every append throws
+    if (mediaSource?.readyState === 'closed' || mediaSource?.readyState === 'ended') {
+      fail(new Error(`MediaSource ${mediaSource.readyState}`), 'runtime');
       return;
     }
 
+    scanner.scan(data, noteKeyframe);
+
     if (sourceBuffer.updating || pendingLength > 0) {
-      const bytes = new Uint8Array(data);
-      if (pendingLength + bytes.byteLength > pendingBuffer.byteLength) {
+      if (!enqueue(new Uint8Array(data))) {
         // Queue overflow — the SourceBuffer stopped draining. Uint8Array.set
         // would throw an uncaught RangeError inside the WS dispatch; surface
         // a proper error instead so the connection layer can recover.
         pendingLength = 0;
-        onError(new Error('MSE pending buffer overflow'));
+        fail(new Error('MSE pending buffer overflow'), 'runtime');
         return;
       }
-      pendingBuffer.set(bytes, pendingLength);
-      pendingLength += bytes.byteLength;
     } else {
       try {
         sourceBuffer.appendBuffer(data);
@@ -201,37 +227,95 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
         if (recoverFromQuota(err)) {
           // Queue the frame — the updateend fired by the eviction retries the
           // drain with it.
-          const bytes = new Uint8Array(data);
-          if (bytes.byteLength <= pendingBuffer.byteLength) {
-            pendingBuffer.set(bytes, 0);
-            pendingLength = bytes.byteLength;
-          }
+          enqueue(new Uint8Array(data));
+        } else {
+          fail(err, 'runtime');
         }
       }
     }
   }
 
-  // QuotaExceeded → evict the tail of the buffered range. remove() is async
-  // and fires updateend, which re-attempts the pending drain. Returns true if
-  // an eviction was started.
+  function enqueue(bytes: Uint8Array): boolean {
+    const needed = pendingLength + bytes.byteLength;
+    if (needed > STREAM_CONFIG.MSE.BUFFER_SIZE) return false;
+    if (needed > pendingBuffer.byteLength) {
+      let size = Math.max(pendingBuffer.byteLength, PENDING_INITIAL_SIZE);
+      while (size < needed) size *= 2;
+      const grown = new Uint8Array(Math.min(size, STREAM_CONFIG.MSE.BUFFER_SIZE));
+      grown.set(pendingBuffer.subarray(0, pendingLength));
+      pendingBuffer = grown;
+    }
+    pendingBuffer.set(bytes, pendingLength);
+    pendingLength = needed;
+    return true;
+  }
+
   function recoverFromQuota(err: unknown): boolean {
     if ((err as DOMException | undefined)?.name !== 'QuotaExceededError') return false;
     if (!sourceBuffer || sourceBuffer.updating || !sourceBuffer.buffered?.length) return false;
     try {
       const start0 = sourceBuffer.buffered.start(0);
       const end = sourceBuffer.buffered.end(sourceBuffer.buffered.length - 1);
-      const evictTo = Math.max(start0 + 1, end - STREAM_CONFIG.MSE.BUFFER_WINDOW);
-      if (evictTo <= start0) return false;
-      sourceBuffer.remove(start0, evictTo);
+      const evictTo = cutPoint(Math.min(videoElement.currentTime, end)) ?? Math.max(start0 + 1, end - STREAM_CONFIG.MSE.BUFFER_WINDOW);
+      if (evictTo <= start0 + CUT_MARGIN) return false;
+      sourceBuffer.remove(start0, evictTo - CUT_MARGIN);
+      forgetKeyframesBefore(evictTo);
       return true;
     } catch {
       return false;
     }
   }
 
+  function noteKeyframe(time: number): void {
+    while (keyframes.length && keyframes[keyframes.length - 1] >= time) keyframes.pop();
+    keyframes.push(time);
+    if (keyframes.length > MAX_KEYFRAMES) keyframes.shift();
+  }
+
+  function forgetKeyframesBefore(time: number): void {
+    while (keyframes.length && keyframes[0] < time) keyframes.shift();
+  }
+
+  function cutPoint(time: number): number | undefined {
+    if (scanner.hasVideo === false) return time;
+    for (let i = keyframes.length - 1; i >= 0; i--) {
+      if (keyframes[i] <= time) return keyframes[i];
+    }
+    return undefined;
+  }
+
+  function seekPoint(time: number, end: number): number {
+    if (!scanner.hasVideo) return time;
+    let point = time;
+    for (const keyframe of keyframes) {
+      if (keyframe > end) break;
+      point = keyframe;
+      if (keyframe >= time) break;
+    }
+    return point;
+  }
+
+  function handleSourceBufferError(): void {
+    fail(new Error('SourceBuffer error'), 'runtime');
+  }
+
+  function handleVideoError(): void {
+    const error = videoElement.error;
+    fail(new Error(error?.message || `Video element error ${error?.code ?? 'unknown'}`), 'runtime');
+  }
+
+  function fail(err: unknown, phase: MSEErrorPhase): void {
+    if (failed || signal.aborted) return;
+    failed = true;
+    onError(err instanceof Error ? err : new Error(String(err)), phase);
+  }
+
   function close(): void {
+    videoElement.removeEventListener('error', handleVideoError);
+
     if (sourceBuffer) {
       sourceBuffer.removeEventListener('updateend', handleUpdateEnd);
+      sourceBuffer.removeEventListener('error', handleSourceBufferError);
 
       if (mediaSource?.readyState === 'open') {
         try {
@@ -261,6 +345,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
     hasFirstData = false;
     pendingLength = 0;
     earlyDataBuffer.length = 0;
+    keyframes.length = 0;
   }
 
   signal.addEventListener('abort', close, { once: true });
@@ -280,6 +365,15 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
     appendBuffer,
     close,
   };
+}
+
+export function chaseLiveEdge(video: HTMLVideoElement): void {
+  if (video.buffered.length > 0) {
+    const end = video.buffered.end(video.buffered.length - 1);
+    if (end - video.currentTime > 1) {
+      video.currentTime = end - LIVE_EDGE_MARGIN;
+    }
+  }
 }
 
 export async function playVideo(videoElement: HTMLVideoElement): Promise<void> {

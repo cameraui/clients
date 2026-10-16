@@ -1,13 +1,17 @@
 import { tryOnScopeDispose } from '@vueuse/core';
-import { ref, shallowRef, watch } from 'vue';
+import { effectScope, ref, shallowRef, watch } from 'vue';
 
 import { useCameraUi } from './useCameraUi.js';
 
 import type { RPCClient } from '@camera.ui/rpc';
-import type { Ref, ShallowRef, WatchSource } from 'vue';
+import type { Ref, ShallowRef, WatchOptions, WatchSource } from 'vue';
 
 const DEFAULT_MAX_RETRIES = 3;
 const DEFAULT_CONNECT_TIMEOUT_MS = 30_000;
+const LINK_SETTLE_MS = 30_000;
+const LOCAL_NOT_CONNECTED = new Set(['Not connected', 'rpc: not connected']);
+
+const linkRestoredAt = new WeakMap<object, number>();
 
 export interface RpcCallOptions {
   maxRetries?: number;
@@ -15,6 +19,7 @@ export interface RpcCallOptions {
   connectTimeoutMs?: number;
   retryDelayMs?: (attempt: number) => number;
   shouldRetry?: (err: unknown, attempt: number) => boolean;
+  retryOnTimeout?: boolean;
   signal?: AbortSignal;
 }
 
@@ -43,32 +48,55 @@ export interface UseRpcSubscriptionReturn {
   resubscribe(): Promise<void>;
 }
 
+export function markLinkRestored(rpcRef: Readonly<ShallowRef<RPCClient | undefined>>): void {
+  linkRestoredAt.set(rpcRef, Date.now());
+}
+
+export function isLinkSettling(rpcRef: Readonly<ShallowRef<RPCClient | undefined>>): boolean {
+  return Date.now() - (linkRestoredAt.get(rpcRef) ?? -Infinity) < LINK_SETTLE_MS;
+}
+
+export function isLocalNoResponders(err: unknown): boolean {
+  return err instanceof Error && (err as { code?: unknown }).code === undefined && err.name === 'NoResponders';
+}
+
 export async function rpcCall<T>(rpcRef: Readonly<ShallowRef<RPCClient | undefined>>, fn: (rpc: RPCClient) => Promise<T>, options: RpcCallOptions = {}): Promise<T> {
   const maxRetries = options.maxRetries ?? DEFAULT_MAX_RETRIES;
   const awaitConnect = options.awaitConnect ?? true;
   const connectTimeoutMs = options.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
   const retryDelayMs = options.retryDelayMs ?? defaultRetryDelayMs;
-  const shouldRetry = options.shouldRetry ?? defaultShouldRetry;
+  const shouldRetry = options.shouldRetry;
+  const retryOnTimeout = options.retryOnTimeout ?? false;
   const signal = options.signal;
 
+  // the transport swaps the client to undefined while the link is down, even when the same client comes back
+  let linkChanges = 0;
+  const stopLinkWatch = watchDetached(rpcRef, () => linkChanges++, { flush: 'sync' });
+
   let lastError: unknown;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (signal?.aborted) throw makeAbortError();
+  try {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      if (signal?.aborted) throw makeAbortError();
 
-    let rpc = rpcRef.value;
-    if (!rpc) {
-      if (!awaitConnect) throw new Error('rpc: not connected');
-      rpc = await waitForRpc(rpcRef, connectTimeoutMs, signal);
-    }
+      let rpc = rpcRef.value;
+      if (!rpc) {
+        if (!awaitConnect) throw new Error('rpc: not connected');
+        rpc = await waitForRpc(rpcRef, connectTimeoutMs, signal);
+      }
 
-    try {
-      return await fn(rpc);
-    } catch (err) {
-      lastError = err;
-      if (attempt >= maxRetries) throw err;
-      if (!shouldRetry(err, attempt)) throw err;
-      await sleep(retryDelayMs(attempt), signal);
+      const changesAtStart = linkChanges;
+      try {
+        return await fn(rpc);
+      } catch (err) {
+        lastError = err;
+        if (attempt >= maxRetries) throw err;
+        const retry = shouldRetry ? shouldRetry(err, attempt) : isLinkFailure(err, rpc, rpcRef, linkChanges !== changesAtStart, retryOnTimeout);
+        if (!retry) throw err;
+        await sleep(retryDelayMs(attempt), signal);
+      }
     }
+  } finally {
+    stopLinkWatch();
   }
   throw lastError ?? new Error('rpc: max retries exceeded');
 }
@@ -136,12 +164,15 @@ export function useRpcSubscription(subscribeFn: (rpc: RPCClient) => Promise<() =
   const retryDelayMs = options.retryDelayMs ?? defaultRetryDelayMs;
 
   let unsubscribe: (() => void) | undefined;
+  // the nats lib carries a subscription across a drop of the same client
+  let boundClient: RPCClient | undefined;
   let pending = false;
   let disposed = false;
 
   async function bind(rpc: RPCClient): Promise<void> {
     if (pending || disposed) return;
     pending = true;
+    boundClient = rpc;
     try {
       if (unsubscribe) {
         try {
@@ -153,9 +184,14 @@ export function useRpcSubscription(subscribeFn: (rpc: RPCClient) => Promise<() =
         unsubscribe = undefined;
       }
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
-        if (disposed) return;
+        if (disposed || boundClient !== rpc) return;
         try {
-          unsubscribe = await subscribeFn(rpc);
+          const off = await subscribeFn(rpc);
+          if (disposed || boundClient !== rpc) {
+            off();
+            return;
+          }
+          unsubscribe = off;
           isActive.value = true;
           return;
         } catch (err) {
@@ -174,13 +210,14 @@ export function useRpcSubscription(subscribeFn: (rpc: RPCClient) => Promise<() =
       // this rebind the subscription would stay dead until the NEXT
       // reconnect.
       const current = ctx.rpc.value;
-      if (!disposed && current && current !== rpc) {
+      if (!disposed && ctx.isConnected.value && current && current !== boundClient) {
         bind(current);
       }
     }
   }
 
   function unbind(): void {
+    boundClient = undefined;
     if (unsubscribe) {
       try {
         unsubscribe();
@@ -201,11 +238,11 @@ export function useRpcSubscription(subscribeFn: (rpc: RPCClient) => Promise<() =
     bind(ctx.rpc.value);
   }
 
-  const stopWatch = watch(ctx.rpc, (rpc, prevRpc) => {
-    if (rpc && rpc !== prevRpc) {
-      bind(rpc);
-    } else if (!rpc && prevRpc) {
+  const stopWatch = watch([ctx.rpc, ctx.isConnected], ([rpc, connected]) => {
+    if (!connected) {
       unbind();
+    } else if (rpc && (rpc !== boundClient || !isActive.value)) {
+      bind(rpc);
     }
   });
 
@@ -222,18 +259,23 @@ function defaultRetryDelayMs(attempt: number): number {
   return Math.min(100 * Math.pow(2, attempt), 1_000);
 }
 
-function defaultShouldRetry(err: unknown): boolean {
+function isLinkFailure(err: unknown, rpc: RPCClient, rpcRef: Readonly<ShallowRef<RPCClient | undefined>>, linkChanged: boolean, retryOnTimeout: boolean): boolean {
+  if (rpcRef.value !== rpc) return true;
+  // closed without suspend or disconnect: the next call dials again
+  if (rpc.isConnected === false && rpc.isClosed === false) return true;
   if (!(err instanceof Error)) return false;
   const code = (err as { code?: unknown }).code;
-  if (code === 'TIMEOUT' || code === 'CONNECTION_CLOSED') return true;
-  const msg = err.message.toLowerCase();
-  if (msg.includes('not connected')) return true;
-  if (msg.includes('connection closed')) return true;
-  if (msg.includes('no responders')) return true;
-  if (msg.includes('connection refused')) return true;
-  if (msg.includes('socket')) return true;
-  if (msg.includes('timed out') || msg.includes('timeout')) return true;
-  return false;
+  if (code === undefined && LOCAL_NOT_CONNECTED.has(err.message)) return true;
+  // this client's own no-responder error: the handler never ran, so a retry repeats nothing
+  if (isLocalNoResponders(err) && isLinkSettling(rpcRef)) return true;
+  // a reply lost while the link blipped surfaces as TIMEOUT
+  return code === 'TIMEOUT' && (retryOnTimeout || linkChanged);
+}
+
+export function watchDetached<T>(source: Readonly<ShallowRef<T>>, cb: (value: T) => void, options?: WatchOptions): () => void {
+  const scope = effectScope(true);
+  scope.run(() => watch(source, cb, options));
+  return () => scope.stop();
 }
 
 async function waitForRpc(rpcRef: Readonly<ShallowRef<RPCClient | undefined>>, timeoutMs: number, signal?: AbortSignal): Promise<RPCClient> {
@@ -250,7 +292,7 @@ async function waitForRpc(rpcRef: Readonly<ShallowRef<RPCClient | undefined>>, t
       reject(makeAbortError());
     };
     signal?.addEventListener('abort', onAbort, { once: true });
-    const stopWatch = watch(rpcRef, (next) => {
+    const stopWatch = watchDetached(rpcRef, (next) => {
       if (next) {
         clearTimeout(timer);
         stopWatch();

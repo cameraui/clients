@@ -126,6 +126,7 @@ export type {
   UseCuiFullscreenOptions,
   UseCuiFullscreenReturn,
   UseOAuthReturn,
+  UsePluginOptions,
   UsePluginReturn,
   UseRpcCallOptions,
   UseRpcCallReturn,
@@ -142,7 +143,7 @@ export type {
   UseTerminalReturn,
 } from './composables/index.js';
 
-export { createActivityMode, STREAM_CONFIG } from './streaming/index.js';
+export { createActivityMode, restartConnectedStreams, STREAM_CONFIG } from './streaming/index.js';
 export type {
   ActivityMode,
   ActivityModeConfig,

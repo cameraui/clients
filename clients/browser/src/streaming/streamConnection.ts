@@ -1,22 +1,23 @@
 /* eslint-disable @stylistic/max-len */
 import { Logger } from '@camera.ui/logger';
+import { classifyClose } from '@camera.ui/transport';
 import { useTimeoutFn, whenever } from '@vueuse/core';
 import { computed, effectScope, ref, shallowRef, toValue, watch } from 'vue';
 
 import { useCameraUi } from '../composables/useCameraUi.js';
-import { useTabVisibility } from '../composables/useTabVisibility.js';
+import { DEFAULT_TAB_PAUSE_MS, useTabVisibility } from '../composables/useTabVisibility.js';
 import { createSourceName } from '../server/index.js';
 import { STREAM_CONFIG } from './config.js';
-import { createMSEHandler, playVideo } from './mse.js';
-import { abortableSleep, canPlayH265, checkWebRTCCompatibility, reportH265DecodeFailure } from './utils.js';
+import { chaseLiveEdge, createMSEHandler, playVideo } from './mse.js';
+import { abortableSleep, canPlayH265, checkWebRTCCompatibility, isVideoInPictureInPicture, reportH265DecodeFailure, suspendsWhenHidden } from './utils.js';
 import { createBackchannelHandler, createWebRTCHandler, processWebRTCMessage } from './webrtc.js';
 
 import type { CameraSource, ProbeStream, StreamingRole } from '@camera.ui/sdk';
 import type { ConnectionTarget } from '@camera.ui/transport';
-import type { WsHandle, WsTransport } from '@camera.ui/transport/transports/ws';
+import type { WsCloseInfo, WsHandle, WsTransport } from '@camera.ui/transport/transports/ws';
 import type { ComputedRef, MaybeRefOrGetter, Ref, ShallowRef } from 'vue';
 import type { ReactiveCameraDevice } from '../types.js';
-import type { MSEHandler } from './mse.js';
+import type { MSEErrorPhase, MSEHandler } from './mse.js';
 import type { Go2RTCMessage, ReactiveStream, StreamDegradeReason, StreamStatus, VideoStreamingMode } from './types.js';
 import type { BackchannelHandler, WebRTCHandler } from './webrtc.js';
 
@@ -32,13 +33,33 @@ export interface StreamConnectionOptions {
 const log = new Logger('StreamConnection');
 
 const MSE_AUDIO_CODEC = /mp4a|opus|flac|mp3/i;
+const RETRY_BASE_DELAY = 1000;
+const RETRY_MAX_DELAY = 30_000;
+const RETRY_RESET_AFTER = 30_000;
+const WS_RESOLVE_TIMEOUT = 15_000;
+const HEALTH_CHECK_INTERVAL = 1000;
+const STALL_AFTER = 3000;
+const STALL_RECONNECT_AFTER = 15_000;
+const HAVE_CURRENT_DATA = 2;
+const PROBE_WAIT_MS = 2_000;
 
-function isVideoInPictureInPicture(video: HTMLVideoElement | undefined | null): boolean {
-  if (!video) return false;
-  if (typeof document !== 'undefined' && 'pictureInPictureElement' in document && document.pictureInPictureElement === video) {
-    return true;
-  }
-  return (video as { webkitPresentationMode?: string }).webkitPresentationMode === 'picture-in-picture';
+type VideoWithFrameCallback = HTMLVideoElement & {
+  requestVideoFrameCallback?: (callback: () => void) => number;
+  cancelVideoFrameCallback?: (id: number) => void;
+};
+
+type SignalingPeer = WebRTCHandler | BackchannelHandler;
+
+function isPageHidden(): boolean {
+  return typeof document !== 'undefined' && document.visibilityState === 'hidden';
+}
+
+function decodedFrames(video: HTMLVideoElement): number | undefined {
+  return typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality().totalVideoFrames : undefined;
+}
+
+function withJitter(delayMs: number): number {
+  return delayMs * (1 - Math.random() / 2);
 }
 
 export class StreamConnection implements ReactiveStream {
@@ -54,6 +75,7 @@ export class StreamConnection implements ReactiveStream {
   public readonly hasAudio: Ref<boolean>;
   public readonly hasBackchannel: Ref<boolean>;
   public readonly isPlaying: Ref<boolean>;
+  public readonly stalled: Ref<boolean>;
   public readonly error: Ref<Error | undefined>;
   public readonly probeInfo: ShallowRef<ProbeStream | undefined>;
   public readonly muted: Ref<boolean>;
@@ -70,21 +92,41 @@ export class StreamConnection implements ReactiveStream {
   private readonly options: StreamConnectionOptions;
   private readonly wsTransport: WsTransport;
   private readonly scope = effectScope(true);
+  private readonly stopsWhenHidden = suspendsWhenHidden();
 
   private connectionGeneration = 0;
   private abortController = new AbortController();
   private probedSourceId: string | undefined;
+  private probeInFlight: { sourceId: string; result: Promise<ProbeStream | undefined> } | undefined;
+  private probing: Promise<ProbeStream | undefined> | undefined;
   private wasPausedByVisibility = false;
+  private hiddenPauseRan = false;
   private disarmPipWatch: (() => void) | null = null;
   private wsHandle: WsHandle | undefined;
+  private wsOpenedAt = 0;
   private webrtcHandler: WebRTCHandler | undefined;
   private mseHandler: MSEHandler | undefined;
-  private firstFrameCallbackId: number | undefined;
+  private cancelFirstFrameWatch: (() => void) | undefined;
+  private awaitingWebRTCFrame = false;
   private backchannelHandler: BackchannelHandler | undefined;
   private pendingMicTrack: MediaStreamTrack | null = null;
+  private offerPeer: SignalingPeer | undefined;
+  private answeredPeer: SignalingPeer | undefined;
   private lastMediaStream: MediaStream | null = null;
   private stopWatchers: (() => void)[] = [];
-  private mseMonitorInterval: ReturnType<typeof setInterval> | undefined;
+  private failures = 0;
+  private playingSince: number | undefined;
+  private connectToken: string | undefined;
+  private rejectedToken: string | undefined;
+  private lastError: Error | undefined;
+  private mseRejected = false;
+  private mseAnswerPending = false;
+  private mseStopPending = false;
+  private healthInterval: ReturnType<typeof setInterval> | undefined;
+  private lastProgressAt = 0;
+  private lastMediaTime = 0;
+  private lastFrameCount: number | undefined;
+  private frameCounterLive = false;
 
   private offTabVisible: (() => void) | undefined;
   private offTabPaused: (() => void) | undefined;
@@ -97,8 +139,6 @@ export class StreamConnection implements ReactiveStream {
   private stopConnectTimeout!: () => void;
   private startMseConnectTimeout!: () => void;
   private stopMseConnectTimeout!: () => void;
-  private startReconnectTimeout!: () => void;
-  private stopReconnectTimeout!: () => void;
 
   constructor(options: StreamConnectionOptions) {
     this.options = options;
@@ -122,6 +162,7 @@ export class StreamConnection implements ReactiveStream {
     this.hasAudio = ref(false);
     this.hasBackchannel = ref(false);
     this.isPlaying = ref(false);
+    this.stalled = ref(false);
     this.error = ref<Error | undefined>();
     this.probeInfo = shallowRef<ProbeStream | undefined>();
     this.muted = ref(true);
@@ -138,14 +179,21 @@ export class StreamConnection implements ReactiveStream {
 
     this.scope.run(() => {
       const { onTabPaused, onTabVisible } = useTabVisibility();
+      // a stalled reader of a hidden page holds the shared tunnel window for every other remote viewer
+      const hiddenStopDelay = this.stopsWhenHidden ? 0 : DEFAULT_TAB_PAUSE_MS;
 
       const wsConnectTimeout = useTimeoutFn(
         () => {
-          if (this.wsHandle?.readyState === WebSocket.CONNECTING) {
-            this.disconnectWebSocket();
-            if (!this.abortController.signal.aborted && this.status.value !== 'closed') {
-              this.restart();
-            }
+          const handle = this.wsHandle;
+          if (!handle || handle.readyState === WebSocket.OPEN) return;
+          // readyState reads CLOSED while the transport still resolves the URL (HA sign_path), that step gets a longer budget
+          if (handle.readyState === WebSocket.CLOSED && performance.now() - this.wsOpenedAt < WS_RESOLVE_TIMEOUT) {
+            this.startWsConnectTimeout();
+            return;
+          }
+          this.disconnectWebSocket();
+          if (!this.abortController.signal.aborted && this.status.value !== 'closed') {
+            this.retryLater();
           }
         },
         STREAM_CONFIG.WEBRTC.WS_CONNECT_TIMEOUT,
@@ -154,25 +202,23 @@ export class StreamConnection implements ReactiveStream {
 
       const connectTimeout = useTimeoutFn(
         () => {
+          if (this.abortController.signal.aborted) return;
           if (this.webrtcHandler && !this.webrtcHandler.isConnected) {
             if (this.requestedMode.value === 'auto') {
-              this.webrtcHandler.close();
-              this.webrtcHandler = undefined;
-              this.activeMode.value = 'mse';
-              if (this.mseHandler?.isReady) {
-                this.status.value = 'connected';
-              } else {
-                this.startMSE();
-              }
+              this.fallBackToMSE();
             } else {
-              this.markSourceUndecodable();
-              this.restart();
+              this.retryAfterNoMedia();
             }
-          } else if (this.status.value === 'connected' && !this.isPlaying.value && !this.abortController.signal.aborted) {
+          } else if ((this.webrtcHandler && this.awaitingWebRTCFrame) || (this.status.value === 'connected' && !this.isPlaying.value)) {
+            // a hidden page may not decode at all, judge the first frame once it can be seen
+            if (isPageHidden()) {
+              this.startConnectTimeout();
+              return;
+            }
             this.handleNoFramesWhileConnected();
           }
         },
-        STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT,
+        () => (this.webrtcTookOver() ? STALL_RECONNECT_AFTER : STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT),
         { immediate: false },
       );
 
@@ -180,21 +226,10 @@ export class StreamConnection implements ReactiveStream {
         () => {
           if (this.abortController.signal.aborted || this.status.value === 'connected' || this.status.value === 'closed') return;
           if (this.mseHandler && !this.mseHandler.isReady) {
-            this.markSourceUndecodable();
-            this.restart();
+            this.retryAfterNoMedia();
           }
         },
         STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT,
-        { immediate: false },
-      );
-
-      const reconnectTimeout = useTimeoutFn(
-        () => {
-          if (!this.abortController.signal.aborted) {
-            this.restart();
-          }
-        },
-        STREAM_CONFIG.WEBRTC.RECONNECT_DELAY,
         { immediate: false },
       );
 
@@ -204,38 +239,48 @@ export class StreamConnection implements ReactiveStream {
       this.stopConnectTimeout = connectTimeout.stop;
       this.startMseConnectTimeout = mseConnectTimeout.start;
       this.stopMseConnectTimeout = mseConnectTimeout.stop;
-      this.startReconnectTimeout = reconnectTimeout.start;
-      this.stopReconnectTimeout = reconnectTimeout.stop;
 
       this.setupWatchers();
 
-      this.offTabPaused = onTabPaused(() => {
-        log.debug(`onTabPaused fired — status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`);
-        if (this.status.value === 'idle' || this.status.value === 'closed') {
-          log.debug(`onTabPaused — already in ${this.status.value}, skipping stop()`);
-          return;
-        }
-        if (isVideoInPictureInPicture(this.videoElement.value)) {
-          log.debug('onTabPaused — video is in picture-in-picture, keeping the stream');
-          this.watchPipLeave();
-          return;
-        }
-        this.wasPausedByVisibility = true;
-        this.stop();
-        log.debug('onTabPaused — stop() done, wasPausedByVisibility=true');
-      });
+      this.offTabPaused = onTabPaused(
+        () => {
+          log.debug(`onTabPaused fired — status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`);
+          this.hiddenPauseRan = true;
+          if (this.status.value === 'idle' || this.status.value === 'closed') {
+            log.debug(`onTabPaused — already in ${this.status.value}, skipping stop()`);
+            return;
+          }
+          if (isVideoInPictureInPicture(this.videoElement.value)) {
+            log.debug('onTabPaused — video is in picture-in-picture, keeping the stream');
+            this.watchPipLeave();
+            return;
+          }
+          this.wasPausedByVisibility = true;
+          this.stop();
+          log.debug('onTabPaused — stop() done, wasPausedByVisibility=true');
+        },
+        { delayMs: hiddenStopDelay },
+      );
 
-      this.offTabVisible = onTabVisible(() => {
+      this.offTabVisible = onTabVisible(({ hiddenMs }) => {
         log.debug(
           `onTabVisible fired — wasPausedByVisibility=${this.wasPausedByVisibility}, status=${this.status.value}, isReady=${this.isReady.value}, target=${!!this.target.value}`,
         );
         this.disarmPipWatch?.();
-        if (!this.wasPausedByVisibility) {
-          log.debug('onTabVisible — not paused by visibility, no-op');
+        const pauseRan = this.hiddenPauseRan;
+        this.hiddenPauseRan = false;
+        if (this.wasPausedByVisibility) {
+          this.wasPausedByVisibility = false;
+          this.startWhenReady();
           return;
         }
-        this.wasPausedByVisibility = false;
-        this.startWhenReady();
+        // the delayed stop never ran (frozen page), nothing has looked at the socket since
+        if (!pauseRan && hiddenMs >= hiddenStopDelay && this.status.value === 'connected') {
+          log.debug(`onTabVisible: hidden for ${hiddenMs}ms without a stop, reconnecting`);
+          this.restart();
+          return;
+        }
+        log.debug('onTabVisible — not paused by visibility, no-op');
       });
 
       if (autoStart) {
@@ -285,12 +330,19 @@ export class StreamConnection implements ReactiveStream {
       log.debug('start() — skipped, isReady=false');
       return;
     }
+    if (this.stopsWhenHidden && isPageHidden()) {
+      log.debug('start() — page hidden, starting once it is visible');
+      this.wasPausedByVisibility = true;
+      return;
+    }
 
     this.cleanup();
     this.abortController = new AbortController();
     const gen = ++this.connectionGeneration;
 
     this.triedSourceIds.clear();
+    this.failures = 0;
+    this.playingSince = undefined;
     this.status.value = 'connecting';
     this.error.value = undefined;
     this.isPlaying.value = false;
@@ -309,9 +361,12 @@ export class StreamConnection implements ReactiveStream {
         return;
       }
 
+      let dialedSourceId: string | undefined;
       for (let attempt = 0; attempt < 3; attempt++) {
         const probedSourceId = this.source.value?._id;
-        const probe = await this.probeStream();
+        dialedSourceId = probedSourceId;
+        log.debug('start(): connecting WebSocket');
+        const probe = await this.dialWithProbe();
 
         // Stale check: restart()/stop() have started a new generation
         if (gen !== this.connectionGeneration) {
@@ -327,22 +382,22 @@ export class StreamConnection implements ReactiveStream {
 
         const reinit = this.initializeSource();
         if (reinit === 'unsupported') {
+          this.disconnectWebSocket();
           this.setUnsupported();
           return;
         }
         if (!reinit) {
+          this.disconnectWebSocket();
           this.error.value = new Error('No streaming source available');
           this.status.value = 'error';
           return;
         }
 
-        // settled on the probed source, or probe failed — connect and let
+        // settled on the probed source, or the probe failed: keep the socket and let
         // the runtime net catch a wrong guess
         if (!probe || this.source.value?._id === probedSourceId) break;
       }
-
-      log.debug('start() — connecting WebSocket');
-      this.connectWebSocket();
+      if (this.source.value?._id !== dialedSourceId) void this.dialWithProbe();
     } catch (err) {
       if (gen !== this.connectionGeneration) return;
       log.debug('start() — error:', err);
@@ -359,6 +414,7 @@ export class StreamConnection implements ReactiveStream {
     log.debug(`stop() — was ${this.status.value}, transitioning to closed`);
     ++this.connectionGeneration;
     this.status.value = 'closed';
+    this.isPlaying.value = false;
     this.cleanup();
   }
 
@@ -403,7 +459,7 @@ export class StreamConnection implements ReactiveStream {
       this.degradeReason.value = result.degradedFrom ? 'codec' : null;
 
       // Only restart if already connected — during 'connecting', start()
-      // re-reads the source before connectWebSocket().
+      // re-reads the source after its probe and dials again on a change.
       if (this.status.value === 'connected') {
         await this.restart();
       }
@@ -411,21 +467,17 @@ export class StreamConnection implements ReactiveStream {
   }
 
   public async setMicrophone(track: MediaStreamTrack | null): Promise<void> {
-    if (this.webrtcHandler) {
-      await this.webrtcHandler.setMicrophoneTrack(track);
+    if (!track) {
+      this.closeBackchannel();
       return;
     }
+    if (!this.hasBackchannel.value) return;
 
-    if (this.activeMode.value === 'mse' && this.hasBackchannel.value) {
-      this.pendingMicTrack = track;
-
-      if (track && !this.backchannelHandler) {
-        await this.startBackchannel();
-      } else if (!track && this.backchannelHandler) {
-        this.closeBackchannel();
-      } else if (this.backchannelHandler?.isConnected) {
-        await this.backchannelHandler.setMicrophoneTrack(track);
-      }
+    this.pendingMicTrack = track;
+    if (!this.backchannelHandler) {
+      await this.startBackchannel();
+    } else if (this.backchannelHandler.isConnected) {
+      await this.backchannelHandler.setMicrophoneTrack(track);
     }
   }
 
@@ -483,8 +535,17 @@ export class StreamConnection implements ReactiveStream {
     this.scope.stop();
   }
 
-  public async restart(): Promise<void> {
-    this.status.value = 'reconnecting';
+  public restart(): Promise<void> {
+    return this.reconnect(1000);
+  }
+
+  public invalidateProbe(): void {
+    this.probeInfo.value = undefined;
+    this.probeInFlight = undefined;
+  }
+
+  private async reconnect(delayMs: number, waitStatus: 'reconnecting' | 'error' = 'reconnecting'): Promise<void> {
+    this.status.value = waitStatus;
     this.isPlaying.value = false;
     this.cleanup();
 
@@ -492,7 +553,7 @@ export class StreamConnection implements ReactiveStream {
     const gen = ++this.connectionGeneration;
 
     try {
-      await abortableSleep(1000, this.abortController.signal);
+      await abortableSleep(delayMs, this.abortController.signal);
     } catch {
       return;
     }
@@ -505,6 +566,7 @@ export class StreamConnection implements ReactiveStream {
       return;
     }
 
+    this.status.value = 'reconnecting';
     try {
       const init = this.initializeSource();
       if (init === 'unsupported') {
@@ -516,12 +578,36 @@ export class StreamConnection implements ReactiveStream {
         this.status.value = 'error';
         return;
       }
-      this.connectWebSocket();
+      void this.dialWithProbe();
     } catch (err) {
       if (gen !== this.connectionGeneration) return;
       this.error.value = err instanceof Error ? err : new Error(String(err));
       this.status.value = 'error';
     }
+  }
+
+  private retryLater(err?: Error): void {
+    const delay = this.nextRetryDelay();
+    if (err) this.error.value = err;
+    this.reconnect(delay, err ? 'error' : 'reconnecting');
+  }
+
+  private nextRetryDelay(): number {
+    if (this.playingSince !== undefined && performance.now() - this.playingSince >= RETRY_RESET_AFTER) {
+      this.failures = 0;
+    }
+    this.playingSince = undefined;
+    const base = Math.min(RETRY_BASE_DELAY * 2 ** this.failures, RETRY_MAX_DELAY);
+    this.failures++;
+    return withJitter(base);
+  }
+
+  private retryAfterNoMedia(): void {
+    if (this.markSourceUndecodable()) {
+      this.restart();
+      return;
+    }
+    this.retryLater(this.lastError);
   }
 
   private startWhenReady(): void {
@@ -550,6 +636,17 @@ export class StreamConnection implements ReactiveStream {
       },
     );
     this.stopWatchers.push(stopAuthWatch);
+
+    const stopTokenWatch = watch(
+      () => this.target.value?.tokens.access,
+      (token) => {
+        if (this.rejectedToken === undefined || !token || token === this.rejectedToken) return;
+        this.rejectedToken = undefined;
+        if (this.status.value === 'idle' || this.status.value === 'closed') return;
+        this.reconnect(0);
+      },
+    );
+    this.stopWatchers.push(stopTokenWatch);
 
     // camera updates swap the inner refs, not the device object — a stream
     // stuck in 'unsupported' re-evaluates when source metadata changes
@@ -620,17 +717,15 @@ export class StreamConnection implements ReactiveStream {
     );
     this.stopWatchers.push(stopVideoElWatch);
 
-    const stopMseWatch = watch(
-      this.activeMode,
-      (mode) => {
-        this.stopMseMonitor();
-        if (mode === 'mse') {
-          this.mseMonitorInterval = setInterval(() => this.monitorMseBuffer(), 1000);
-        }
+    const stopHealthWatch = watch(
+      () => this.status.value === 'connected' && this.isPlaying.value,
+      (active) => {
+        this.stopHealthCheck();
+        if (active) this.startHealthCheck();
       },
       { immediate: true },
     );
-    this.stopWatchers.push(stopMseWatch);
+    this.stopWatchers.push(stopHealthWatch);
 
     const stopCameraWatch = watch([this.camera, this.videoElement, () => this.target.value], ([newCamera, newVideo, newClient], [oldCamera, oldVideo]) => {
       if (newCamera !== oldCamera) {
@@ -782,28 +877,37 @@ export class StreamConnection implements ReactiveStream {
     return video.length > 0 && video.every((v) => v.codec === 'H265');
   }
 
-  private markSourceUndecodable(): void {
+  private markSourceUndecodable(): boolean {
     const src = this.source.value;
-    if (!src || !this.sourceLikelyH265()) return;
+    if (!src || !this.sourceLikelyH265()) return false;
     this.triedSourceIds.add(src._id);
+    this.invalidateProbe();
+    return true;
   }
 
   private handleNoFramesWhileConnected(): void {
-    if (this.sourceLikelyH265()) {
+    // a missed first frame after a takeover may only be a late keyframe, too weak to rule out H.265 for the whole page
+    if (this.sourceLikelyH265() && !this.webrtcTookOver()) {
       reportH265DecodeFailure(this.activeMode.value === 'mse' ? 'mse' : 'webrtc');
     }
 
-    if (this.requestedMode.value === 'auto' && this.activeMode.value !== 'mse') {
+    if (this.requestedMode.value === 'auto' && this.activeMode.value !== 'mse' && !this.mseRejected) {
       this.webrtcHandler?.close();
       this.webrtcHandler = undefined;
+      this.awaitingWebRTCFrame = false;
       this.activeMode.value = 'mse';
+      this.isPlaying.value = false;
       this.status.value = 'reconnecting';
       this.startMSE();
+      this.resumeBackchannel();
       return;
     }
 
-    this.markSourceUndecodable();
-    this.restart();
+    this.retryAfterNoMedia();
+  }
+
+  private webrtcTookOver(): boolean {
+    return this.awaitingWebRTCFrame && this.isPlaying.value;
   }
 
   private noteDeliveredAudio(delivered: boolean): void {
@@ -812,21 +916,31 @@ export class StreamConnection implements ReactiveStream {
     }
   }
 
-  private async probeStream(): Promise<ProbeStream | undefined> {
+  private probeStream(): Promise<ProbeStream | undefined> {
     const cam = this.camera.value;
     const source = this.source.value;
-    if (!cam || !source || this.abortController.signal.aborted) return undefined;
+    if (!cam || !source || this.abortController.signal.aborted) return Promise.resolve(undefined);
+    // while the NATS link is down a probe waits for it, the next dials of its source wait on the same one
+    if (this.probeInFlight?.sourceId === source._id) return this.probeInFlight.result;
 
+    const entry = { sourceId: source._id, result: Promise.resolve<ProbeStream | undefined>(undefined) };
+    this.probeInFlight = entry;
+    entry.result = this.askProbe(cam, entry);
+    return entry.result;
+  }
+
+  private async askProbe(cam: ReactiveCameraDevice, entry: { sourceId: string }): Promise<ProbeStream | undefined> {
     try {
-      const probe = await cam.probeStream(source._id, {
+      const probe = await cam.probeStream(entry.sourceId, {
         video: true,
         audio: ['pcma', 'opus'],
         microphone: true,
       });
 
-      if (probe && !this.abortController.signal.aborted) {
+      // a dropped probe, or one for a source left behind, describes nothing on screen
+      if (probe && this.probeInFlight === entry && !this.abortController.signal.aborted) {
         this.probeInfo.value = probe;
-        this.probedSourceId = source._id;
+        this.probedSourceId = entry.sourceId;
         this.hasBackchannel.value = probe.audio.some((a) => a.direction === 'recvonly');
         this.hasAudio.value = probe.audio.filter((a) => a.direction === 'sendonly').length > 0;
         this.hasVideo.value = probe.video.filter((v) => v.direction === 'sendonly').length > 0;
@@ -835,7 +949,33 @@ export class StreamConnection implements ReactiveStream {
       return probe;
     } catch {
       return undefined;
+    } finally {
+      if (this.probeInFlight === entry) this.probeInFlight = undefined;
     }
+  }
+
+  private dialWithProbe(): Promise<ProbeStream | undefined> {
+    const probing = this.settledProbe(this.probeForSource());
+    this.probing = probing;
+    this.connectWebSocket();
+    return probing;
+  }
+
+  private probeForSource(): Promise<ProbeStream | undefined> {
+    const source = this.source.value;
+    const known = this.probeInfo.value;
+    return known && source && this.probedSourceId === source._id ? Promise.resolve(known) : this.probeStream();
+  }
+
+  private settledProbe(probe: Promise<ProbeStream | undefined>): Promise<ProbeStream | undefined> {
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => resolve(undefined), PROBE_WAIT_MS);
+      const settle = (result: ProbeStream | undefined): void => {
+        clearTimeout(timer);
+        resolve(result);
+      };
+      probe.then(settle, () => settle(undefined));
+    });
   }
 
   private connectWebSocket(): void {
@@ -849,6 +989,16 @@ export class StreamConnection implements ReactiveStream {
     const sourceNamePart = this.source.value.name ?? this.source.value.role ?? this.source.value._id;
     const sourceName = createSourceName(cam.name.value, sourceNamePart);
 
+    this.connectToken = this.target.value.tokens.access;
+    this.rejectedToken = undefined;
+    this.lastError = undefined;
+    this.mseRejected = false;
+    this.mseAnswerPending = false;
+    this.mseStopPending = false;
+    this.offerPeer = undefined;
+    this.answeredPeer = undefined;
+
+    this.wsOpenedAt = performance.now();
     this.startWsConnectTimeout();
 
     this.wsHandle = this.wsTransport.open({
@@ -858,7 +1008,7 @@ export class StreamConnection implements ReactiveStream {
     });
 
     this.wsHandle.on('open', () => this.handleWsOpen());
-    this.wsHandle.on('close', () => this.handleWsClose());
+    this.wsHandle.on('close', (info) => this.handleWsClose(info));
     this.wsHandle.on('message', (ev) => this.handleWsMessage(ev));
     this.wsHandle.on('error', () => {});
   }
@@ -883,6 +1033,15 @@ export class StreamConnection implements ReactiveStream {
     this.stopWsConnectTimeout();
     this.status.value = 'connecting';
 
+    // WebRTC or MSE and the talk path follow the probe
+    const handle = this.wsHandle;
+    void (this.probing ?? Promise.resolve(undefined)).then(() => {
+      if (this.abortController.signal.aborted || this.wsHandle !== handle) return;
+      this.requestStream();
+    });
+  }
+
+  private requestStream(): void {
     const mode = this.requestedMode.value;
 
     if (mode === 'auto') {
@@ -894,10 +1053,34 @@ export class StreamConnection implements ReactiveStream {
     }
   }
 
-  private handleWsClose(): void {
-    if (this.status.value !== 'closed' && !this.abortController.signal.aborted) {
-      this.startReconnectTimeout();
+  private handleWsClose(info: WsCloseInfo | undefined): void {
+    if (this.status.value === 'closed' || this.abortController.signal.aborted) return;
+
+    const kind = info ? classifyClose(info) : 'other';
+    if (kind === 'other') {
+      this.retryLater();
+      return;
     }
+
+    const rejected = this.connectToken;
+    log.debug(`go2rtc socket closed (${info?.code}): ${info?.reason}`);
+    if (kind === 'forbidden') {
+      // retrying cannot help until the token or the endpoint changes, the watchers take it from there
+      this.error.value = new Error(info?.reason || `Stream refused (${info?.code})`);
+      this.status.value = 'error';
+      this.isPlaying.value = false;
+      this.cleanup();
+      this.rejectedToken = rejected;
+      return;
+    }
+
+    // the transport's auth-error makes the kernel refresh, the token watcher reconnects with the new one
+    if (this.target.value?.tokens.access !== rejected) {
+      this.reconnect(0);
+      return;
+    }
+    this.reconnect(withJitter(RETRY_MAX_DELAY));
+    this.rejectedToken = rejected;
   }
 
   private handleWsMessage(ev: MessageEvent): void {
@@ -915,22 +1098,28 @@ export class StreamConnection implements ReactiveStream {
       this.handleMessage(msg);
     } else if (this.mseHandler) {
       this.mseHandler.appendBuffer(ev.data);
-      this.handleFirstFrame();
     }
   }
 
   private handleMessage(msg: Go2RTCMessage): void {
     switch (msg.type) {
       case 'webrtc/answer':
+        this.answeredPeer = this.takeOfferReply();
+        if (this.answeredPeer) processWebRTCMessage(this.answeredPeer, msg);
+        this.resumeBackchannel();
+        break;
+
       case 'webrtc/candidate':
-        if (this.webrtcHandler) {
-          processWebRTCMessage(this.webrtcHandler, msg);
-        } else if (this.backchannelHandler) {
-          processWebRTCMessage(this.backchannelHandler, msg);
-        }
+        // candidates follow their answer, those of a peer closed meanwhile go nowhere
+        if (this.answeredPeer && this.isCurrentPeer(this.answeredPeer)) processWebRTCMessage(this.answeredPeer, msg);
         break;
 
       case 'mse':
+        this.mseAnswerPending = false;
+        if (this.mseStopPending) {
+          this.mseStopPending = false;
+          this.sendWsMessage({ type: 'mse/stop' });
+        }
         if (this.mseHandler && typeof msg.value === 'string') {
           this.noteDeliveredAudio(MSE_AUDIO_CODEC.test(msg.value));
           this.mseHandler.initializeBuffer(msg.value);
@@ -938,12 +1127,50 @@ export class StreamConnection implements ReactiveStream {
         break;
 
       case 'error':
-        if (this.requestedMode.value !== 'auto') {
-          this.error.value = new Error(msg.value);
-          this.status.value = 'error';
-        }
+        this.handleGo2rtcError(String(msg.value));
         break;
     }
+  }
+
+  private handleGo2rtcError(message: string): void {
+    const request = message.slice(0, Math.max(0, message.indexOf(':')));
+    const err = new Error(message);
+    log.debug(`go2rtc error: ${message}`);
+
+    if (request === 'webrtc/offer') {
+      const peer = this.takeOfferReply();
+      if (peer && peer === this.webrtcHandler && !peer.isConnected) {
+        this.lastError = err;
+        this.stopConnectTimeout();
+        if (this.requestedMode.value === 'auto') {
+          this.fallBackToMSE();
+        } else {
+          this.retryLater(err);
+        }
+        return;
+      }
+      // the talk backchannel negotiates on the same socket, its failure leaves the picture alone
+      if (peer && peer === this.backchannelHandler) this.closeBackchannel();
+      this.resumeBackchannel();
+      return;
+    }
+
+    if (request === 'mse') {
+      this.mseAnswerPending = false;
+      this.mseStopPending = false;
+      if (!this.mseHandler) return;
+      this.lastError = err;
+      this.mseRejected = true;
+      if (this.requestedMode.value === 'auto' && this.webrtcHandler) {
+        this.dropMSE();
+        return;
+      }
+      this.retryLater(err);
+      return;
+    }
+
+    // a rejected ICE candidate or an unknown request does not end the session
+    if (!request.startsWith('webrtc')) this.lastError = err;
   }
 
   private async startWebRTC(mode: 'webrtc' | 'webrtc/tcp'): Promise<void> {
@@ -951,7 +1178,7 @@ export class StreamConnection implements ReactiveStream {
 
     this.startConnectTimeout();
 
-    this.webrtcHandler = createWebRTCHandler({
+    const handler = createWebRTCHandler({
       mode,
       signal: this.abortController.signal,
       onConnected: (stream) => this.handleWebRTCConnected(stream),
@@ -959,10 +1186,11 @@ export class StreamConnection implements ReactiveStream {
       onFailed: () => this.handleWebRTCFailed(),
       onCandidate: (candidate) => this.sendWsMessage({ type: 'webrtc/candidate', value: candidate }),
     });
+    this.webrtcHandler = handler;
 
-    const offer = await this.webrtcHandler.createOffer();
-    if (offer && !this.abortController.signal.aborted) {
-      this.sendWsMessage({ type: 'webrtc/offer', value: offer });
+    const offer = await handler.createOffer();
+    if (offer && !this.abortController.signal.aborted && this.webrtcHandler === handler) {
+      this.sendOffer(handler, offer);
     }
   }
 
@@ -993,15 +1221,19 @@ export class StreamConnection implements ReactiveStream {
 
     this.status.value = 'connected';
 
-    this.handleFirstFrameWebRTC(stream);
+    // MSE may already be on screen, the WebRTC track still has to prove it renders
+    if (stream.getVideoTracks().length > 0) {
+      this.awaitingWebRTCFrame = true;
+      // go2rtc replays no GOP to WebRTC, its first frame waits for the camera's next keyframe
+      if (this.webrtcTookOver()) this.startConnectTimeout();
+      this.resetHealthBaseline(video);
+      this.watchFirstFrame(video);
+    } else {
+      this.handleFirstFrame();
+    }
 
     if (this.requestedMode.value === 'auto' && this.mseHandler) {
-      // the WS stays open for signaling and talkback, so go2rtc has to be told
-      // to drop the fMP4 consumer, otherwise it keeps pushing frames nobody reads
-      this.mseHandler.close();
-      this.mseHandler = undefined;
-      this.stopMseConnectTimeout();
-      this.sendWsMessage({ type: 'mse/stop' });
+      this.dropMSE();
     }
   }
 
@@ -1014,8 +1246,9 @@ export class StreamConnection implements ReactiveStream {
         this.webrtcHandler = undefined;
         this.activeMode.value = 'mse';
         this.status.value = 'connected';
+        this.resumeBackchannel();
       } else {
-        this.restart();
+        this.retryLater();
       }
     }
   }
@@ -1026,18 +1259,27 @@ export class StreamConnection implements ReactiveStream {
     this.stopConnectTimeout();
 
     if (this.requestedMode.value === 'auto') {
-      this.webrtcHandler?.close();
-      this.webrtcHandler = undefined;
-      this.activeMode.value = 'mse';
-      if (!this.mseHandler?.isReady) {
-        this.startMSE();
-      } else {
-        this.status.value = 'connected';
-      }
+      this.fallBackToMSE();
     } else {
-      this.error.value = new Error('WebRTC connection failed');
-      this.status.value = 'error';
+      this.retryLater(this.lastError ?? new Error('WebRTC connection failed'));
     }
+  }
+
+  private fallBackToMSE(): void {
+    this.webrtcHandler?.close();
+    this.webrtcHandler = undefined;
+    this.awaitingWebRTCFrame = false;
+    if (this.mseRejected) {
+      this.retryLater(this.lastError);
+      return;
+    }
+    this.activeMode.value = 'mse';
+    if (this.mseHandler?.isReady) {
+      this.handleMSEReady();
+    } else {
+      this.startMSE();
+    }
+    this.resumeBackchannel();
   }
 
   private startMSE(): void {
@@ -1051,23 +1293,18 @@ export class StreamConnection implements ReactiveStream {
       signal: this.abortController.signal,
       onReady: () => this.handleMSEReady(),
       onFirstData: () => this.handleMSEFirstData(),
-      onError: (err) => {
-        if (this.requestedMode.value !== 'auto') {
-          this.error.value = err;
-          this.status.value = 'error';
-        } else if (this.activeMode.value === 'mse' && this.status.value === 'connected') {
-          // Auto mode with MSE as the active playback: a dead SourceBuffer
-          // (overflow, failed quota eviction) would freeze the video
-          // silently — recover via restart.
-          log.debug('MSE error while active in auto mode — restarting:', err);
-          this.restart();
-        }
-      },
+      onError: (err, phase) => this.handleMSEError(err, phase),
     });
 
     const codecs = this.mseHandler.setup();
     if (codecs) {
+      // the held stop belongs to the dropped request and has to reach go2rtc before the new one
+      if (this.mseStopPending) {
+        this.mseStopPending = false;
+        this.sendWsMessage({ type: 'mse/stop' });
+      }
       this.sendWsMessage({ type: 'mse', value: codecs });
+      this.mseAnswerPending = true;
       this.startMseConnectTimeout();
     }
   }
@@ -1086,6 +1323,11 @@ export class StreamConnection implements ReactiveStream {
       this.activeMode.value = 'mse';
       this.status.value = 'connected';
     }
+
+    // with WebRTC out of the race nothing else would notice bytes that never decode
+    if (!this.webrtcHandler && !this.isPlaying.value) {
+      this.startConnectTimeout();
+    }
   }
 
   private handleMSEFirstData(): void {
@@ -1093,14 +1335,62 @@ export class StreamConnection implements ReactiveStream {
 
     const video = this.videoElement.value;
     if (video) {
+      this.watchFirstFrame(video);
       playVideo(video);
     }
   }
 
-  private async startAutoMode(): Promise<void> {
+  private handleMSEError(err: Error, phase: MSEErrorPhase): void {
+    if (this.abortController.signal.aborted) return;
+    log.debug(`MSE ${phase} error:`, err);
+
+    // auto mode with WebRTC still in play: only the fMP4 path goes, WebRTC and its deadline decide the rest
+    if (this.requestedMode.value === 'auto' && this.webrtcHandler) {
+      const tookOver = this.isPlaying.value || this.status.value === 'connected';
+      this.dropMSE();
+      if (tookOver) {
+        this.isPlaying.value = false;
+        this.status.value = 'reconnecting';
+      }
+      return;
+    }
+
+    const video = this.videoElement.value;
+    const beforeFirstFrame = !video || video.readyState < HAVE_CURRENT_DATA;
+    if ((phase === 'setup' || beforeFirstFrame) && this.sourceLikelyH265()) {
+      reportH265DecodeFailure('mse');
+      this.markSourceUndecodable();
+      this.restart();
+      return;
+    }
+
+    if (phase === 'setup') {
+      this.error.value = err;
+      this.status.value = 'error';
+      this.cleanup();
+      return;
+    }
+
+    this.retryLater();
+  }
+
+  private dropMSE(): void {
+    this.mseHandler?.close();
+    this.mseHandler = undefined;
+    this.stopMseConnectTimeout();
+    // a stop that overtakes a slow attach finds no consumer yet, go2rtc would stream on
+    if (this.mseAnswerPending) {
+      this.mseStopPending = true;
+    } else {
+      this.sendWsMessage({ type: 'mse/stop' });
+    }
+  }
+
+  private startAutoMode(): void {
     if (this.abortController.signal.aborted) return;
 
-    const probe = this.probeInfo.value ?? (await this.probeStream());
+    // without a probe both paths start and the runtime decides
+    const probe = this.probeInfo.value;
     if (probe) {
       const compatibility = checkWebRTCCompatibility(probe);
 
@@ -1111,66 +1401,102 @@ export class StreamConnection implements ReactiveStream {
       }
     }
 
-    this.startMSE();
+    // WebRTC first, so an MSE setup that fails synchronously only drops MSE
     this.startWebRTC('webrtc');
+    this.startMSE();
   }
 
   private handleFirstFrame(): void {
-    if (!this.isPlaying.value && !this.abortController.signal.aborted) {
+    if (this.abortController.signal.aborted) return;
+
+    // a frame of the MSE fallback must not end the deadline of a WebRTC attempt still negotiating
+    if (!this.webrtcHandler || this.webrtcHandler.isConnected) {
       this.stopConnectTimeout();
+      this.awaitingWebRTCFrame = false;
+      this.resumeBackchannel();
+    }
+    this.error.value = undefined;
+    if (!this.isPlaying.value) {
       this.isPlaying.value = true;
+      this.playingSince = performance.now();
     }
   }
 
-  private monitorMseBuffer(): void {
-    const video = this.videoElement.value;
-    if (!video || this.activeMode.value !== 'mse' || !this.isPlaying.value) return;
-    if (video.buffered.length > 0) {
-      const end = video.buffered.end(video.buffered.length - 1);
-      if (end - video.currentTime > 1) {
-        video.currentTime = end;
-      }
-    }
-  }
-
-  private stopMseMonitor(): void {
-    if (this.mseMonitorInterval !== undefined) {
-      clearInterval(this.mseMonitorInterval);
-      this.mseMonitorInterval = undefined;
-    }
-  }
-
-  private handleFirstFrameWebRTC(stream: MediaStream): void {
-    const video = this.videoElement.value;
-    if (this.isPlaying.value || this.abortController.signal.aborted || !video) return;
-
-    const videoTrack = stream.getVideoTracks()[0];
-    if (!videoTrack) {
+  private watchFirstFrame(video: HTMLVideoElement): void {
+    this.cancelFirstFrameWatch?.();
+    if (video.readyState >= HAVE_CURRENT_DATA) {
       this.handleFirstFrame();
       return;
     }
 
-    type VideoWithCallback = HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number };
-    const videoWithCallback = video as VideoWithCallback;
+    const target = video as VideoWithFrameCallback;
+    const onFrame = () => {
+      this.cancelFirstFrameWatch?.();
+      this.handleFirstFrame();
+    };
+    const callbackId = target.requestVideoFrameCallback?.(onFrame);
+    video.addEventListener('loadeddata', onFrame);
+    this.cancelFirstFrameWatch = () => {
+      this.cancelFirstFrameWatch = undefined;
+      video.removeEventListener('loadeddata', onFrame);
+      if (callbackId !== undefined) target.cancelVideoFrameCallback?.(callbackId);
+    };
+  }
 
-    if (typeof videoWithCallback.requestVideoFrameCallback === 'function') {
-      this.firstFrameCallbackId = videoWithCallback.requestVideoFrameCallback(() => {
-        if (!this.abortController.signal.aborted) {
-          this.handleFirstFrame();
-        }
-      });
-    } else {
-      const checkFrame = () => {
-        if (this.abortController.signal.aborted) return;
+  private startHealthCheck(): void {
+    const video = this.videoElement.value;
+    if (video) this.resetHealthBaseline(video);
+    this.healthInterval = setInterval(() => this.checkHealth(), HEALTH_CHECK_INTERVAL);
+  }
 
-        if (video.readyState >= 2 && video.videoWidth > 0) {
-          this.handleFirstFrame();
-        } else {
-          this.firstFrameCallbackId = requestAnimationFrame(checkFrame);
-        }
-      };
-      this.firstFrameCallbackId = requestAnimationFrame(checkFrame);
+  private stopHealthCheck(): void {
+    if (this.healthInterval !== undefined) {
+      clearInterval(this.healthInterval);
+      this.healthInterval = undefined;
     }
+    this.stalled.value = false;
+  }
+
+  private resetHealthBaseline(video: HTMLVideoElement): void {
+    this.lastProgressAt = performance.now();
+    this.lastMediaTime = video.currentTime;
+    this.lastFrameCount = decodedFrames(video);
+    this.frameCounterLive = false;
+    this.stalled.value = false;
+  }
+
+  private checkHealth(): void {
+    const video = this.videoElement.value;
+    if (!video) return;
+
+    const mse = this.activeMode.value === 'mse';
+    const frames = decodedFrames(video);
+    if (frames !== undefined && frames > 0) this.frameCounterLive = true;
+    const progressed = frames !== this.lastFrameCount || (mse && video.currentTime !== this.lastMediaTime);
+    if (mse) chaseLiveEdge(video);
+    this.lastMediaTime = video.currentTime;
+    this.lastFrameCount = frames;
+
+    const now = performance.now();
+    if (progressed || !this.expectsFrames(video)) {
+      this.lastProgressAt = now;
+      this.stalled.value = false;
+      return;
+    }
+
+    const silentFor = now - this.lastProgressAt;
+    if (silentFor >= STALL_RECONNECT_AFTER) {
+      log.debug(`no frame for ${Math.round(silentFor)}ms, reconnecting`);
+      this.retryLater();
+    } else if (silentFor >= STALL_AFTER) {
+      this.stalled.value = true;
+    }
+  }
+
+  private expectsFrames(video: HTMLVideoElement): boolean {
+    if (this.paused.value || video.paused || isVideoInPictureInPicture(video) || isPageHidden()) return false;
+    // a browser without frame counts for this source leaves nothing to judge WebRTC by
+    return this.activeMode.value === 'mse' || this.frameCounterLive;
   }
 
   private cleanup(): void {
@@ -1179,9 +1505,10 @@ export class StreamConnection implements ReactiveStream {
     this.stopConnectTimeout();
     this.stopWsConnectTimeout();
     this.stopMseConnectTimeout();
-    this.stopReconnectTimeout();
 
-    this.stopMseMonitor();
+    this.stopHealthCheck();
+    this.cancelFirstFrameWatch?.();
+    this.awaitingWebRTCFrame = false;
 
     this.lastMediaStream = null;
 
@@ -1197,16 +1524,6 @@ export class StreamConnection implements ReactiveStream {
     this.disconnectWebSocket();
 
     const video = this.videoElement.value;
-
-    if (this.firstFrameCallbackId !== undefined) {
-      if (video && 'cancelVideoFrameCallback' in video) {
-        (video as HTMLVideoElement & { cancelVideoFrameCallback: (id: number) => void }).cancelVideoFrameCallback(this.firstFrameCallbackId);
-      } else {
-        cancelAnimationFrame(this.firstFrameCallbackId);
-      }
-      this.firstFrameCallbackId = undefined;
-    }
-
     if (video) {
       video.style.display = '';
       video.pause();
@@ -1220,28 +1537,58 @@ export class StreamConnection implements ReactiveStream {
     if (this.abortController.signal.aborted || !this.wsHandle || this.wsHandle.readyState !== WebSocket.OPEN) {
       return;
     }
+    if (this.offerPeer) return;
+    // go2rtc closes a peer it does not count as connected when the socket offers again, and counts it one DTLS flight after the browser: a frame proves it
+    if (this.webrtcHandler && (!this.webrtcHandler.isConnected || this.awaitingWebRTCFrame)) return;
 
-    this.backchannelHandler = createBackchannelHandler({
+    const handler = createBackchannelHandler({
+      filterUdp: this.requestedMode.value === 'webrtc/tcp',
       signal: this.abortController.signal,
       onCandidate: (candidate) => this.sendWsMessage({ type: 'webrtc/candidate', value: candidate }),
       onConnected: async () => {
-        if (this.pendingMicTrack && this.backchannelHandler) {
-          await this.backchannelHandler.setMicrophoneTrack(this.pendingMicTrack);
+        if (this.pendingMicTrack && this.backchannelHandler === handler) {
+          await handler.setMicrophoneTrack(this.pendingMicTrack);
         }
       },
-      onDisconnected: () => {
-        this.backchannelHandler = undefined;
-      },
+      onFailed: () => this.closeBackchannel(handler),
     });
+    this.backchannelHandler = handler;
 
-    const offer = await this.backchannelHandler.createOffer();
-    if (offer && !this.abortController.signal.aborted) {
-      this.sendWsMessage({ type: 'webrtc/offer', value: offer });
+    let offer: string | undefined;
+    try {
+      offer = await handler.createOffer();
+    } catch {
+      this.closeBackchannel(handler);
+      return;
+    }
+    if (offer && !this.abortController.signal.aborted && this.backchannelHandler === handler) {
+      this.sendOffer(handler, offer);
     }
   }
 
-  private closeBackchannel(): void {
-    this.backchannelHandler?.close();
+  private resumeBackchannel(): void {
+    if (this.pendingMicTrack && !this.backchannelHandler) this.startBackchannel();
+  }
+
+  private sendOffer(peer: SignalingPeer, sdp: string): void {
+    if (this.wsHandle?.readyState !== WebSocket.OPEN) return;
+    this.offerPeer = peer;
+    this.wsHandle.send(JSON.stringify({ type: 'webrtc/offer', value: sdp }));
+  }
+
+  private takeOfferReply(): SignalingPeer | undefined {
+    const peer = this.offerPeer;
+    this.offerPeer = undefined;
+    return peer && this.isCurrentPeer(peer) ? peer : undefined;
+  }
+
+  private isCurrentPeer(peer: SignalingPeer): boolean {
+    return peer === this.webrtcHandler || peer === this.backchannelHandler;
+  }
+
+  private closeBackchannel(handler = this.backchannelHandler): void {
+    handler?.close();
+    if (handler !== this.backchannelHandler) return;
     this.backchannelHandler = undefined;
     this.pendingMicTrack = null;
   }

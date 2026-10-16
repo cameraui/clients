@@ -3,6 +3,8 @@ import { computed, ref, shallowRef, toValue, watch } from 'vue';
 
 import { NamespaceManager } from '../server/index.js';
 import { createDebouncedCache } from '../utils/createDebouncedCache.js';
+import { liveBulkClient, noticeBulkTimeout } from './bulkLane.js';
+import { forgetPluginId } from './resolvePluginId.js';
 import { useCameraUi } from './useCameraUi.js';
 import { rpcCall } from './useRpc.js';
 
@@ -10,6 +12,10 @@ import type { Promisify, RPCClient } from '@camera.ui/rpc';
 import type { BasePlugin, PluginContract, PluginInterfaces } from '@camera.ui/sdk';
 import type { ComputedRef, MaybeRefOrGetter, Ref, ShallowRef } from 'vue';
 import type { CoreManagerInterface } from '../server/index.js';
+
+export interface UsePluginOptions {
+  lane?: 'main' | 'bulk';
+}
 
 export interface UsePluginReturn {
   plugin: ShallowRef<Promisify<BasePlugin & PluginInterfaces> | undefined>;
@@ -22,6 +28,9 @@ export interface UsePluginReturn {
 interface CachedPlugin {
   proxy: Promisify<BasePlugin & PluginInterfaces>;
   contract: PluginContract | undefined;
+  namespace: string;
+  client: RPCClient;
+  bulkProxy?: Promisify<BasePlugin & PluginInterfaces>;
 }
 
 interface HostPluginInfo {
@@ -35,6 +44,8 @@ interface PluginStatusMessage {
   data: { pluginName: string; running: boolean };
 }
 
+type PluginStatusListener = (pluginName: string, running: boolean) => void;
+
 const RETRY_BASE_MS = 2_000;
 const RETRY_MAX_MS = 30_000;
 
@@ -43,7 +54,10 @@ const pluginCache = createDebouncedCache<CachedPlugin>({
 });
 
 const pendingLoads = new Map<string, Promise<CachedPlugin | undefined>>();
+const pendingChecks = new Map<string, Promise<void>>();
 const instances = new Set<() => void>();
+const statusListeners = new Set<PluginStatusListener>();
+const pluginRunning = new Map<string, boolean>();
 
 const reloaders = new Map<string, Set<() => void>>();
 const retryTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -55,6 +69,8 @@ let statusUnsubscribe: (() => void) | undefined;
 export function clearPluginCache(): void {
   pluginCache.clear();
   pendingLoads.clear();
+  pendingChecks.clear();
+  forgetPluginStatus();
   for (const reset of instances) {
     try {
       reset();
@@ -95,17 +111,100 @@ function scheduleRetry(name: string): void {
   retryTimers.set(name, timer);
 }
 
-function handleStatusMessage(message: PluginStatusMessage): void {
-  if (message?.type !== 'pluginStatusChanged') return;
+export function onPluginStatus(listener: PluginStatusListener): () => void {
+  statusListeners.add(listener);
+  return () => {
+    statusListeners.delete(listener);
+  };
+}
 
-  const { pluginName, running } = message.data;
-  if (!running) pluginCache.forceRelease(pluginName);
+export function isPluginStopped(pluginName: string): boolean {
+  return pluginRunning.get(pluginName) === false;
+}
+
+export function forgetPluginStatus(): void {
+  pluginRunning.clear();
+}
+
+function applyStatus(pluginName: string, running: boolean, stale = !running): void {
+  pluginRunning.set(pluginName, running);
+  if (stale) {
+    pluginCache.forceRelease(pluginName);
+    // a reinstalled plugin comes back under a new id
+    forgetPluginId(pluginName);
+  }
 
   stopRetry(pluginName);
   notifyReloaders(pluginName);
+  for (const listener of [...statusListeners]) {
+    try {
+      listener(pluginName, running);
+    } catch {
+      // one listener must not keep the others from the status
+    }
+  }
 }
 
-async function ensureStatusSubscription(rpc: Readonly<ShallowRef<RPCClient | undefined>>): Promise<void> {
+function handleStatusMessage(message: PluginStatusMessage): void {
+  if (message?.type !== 'pluginStatusChanged') return;
+  applyStatus(message.data.pluginName, message.data.running);
+}
+
+function checkPlugin(name: string, rpc: Readonly<ShallowRef<RPCClient | undefined>>): void {
+  const cached = pluginCache.get(name);
+  if (!cached || pendingChecks.has(name)) return;
+
+  const check = rpcCall(rpc, (client) => client.createProxy<CoreManagerInterface>(NamespaceManager.coreManagerNamespaces().coreManagerRpc).getPlugin(name))
+    .then((info) => {
+      const pluginInfo = info as HostPluginInfo | undefined;
+      if (pluginCache.get(name) !== cached) return;
+      const running = !!pluginInfo && pluginInfo.running !== false;
+      const moved = running && NamespaceManager.pluginNamespaces(pluginInfo.id).pluginChildRpc !== cached.namespace;
+      if (running && !moved) return;
+      applyStatus(name, running, true);
+    })
+    .catch(() => {})
+    .finally(() => {
+      if (pendingChecks.get(name) === check) pendingChecks.delete(name);
+    });
+  pendingChecks.set(name, check);
+}
+
+function createLaneProxy(
+  namespace: string,
+  main: Promisify<BasePlugin & PluginInterfaces>,
+  lane: Readonly<ShallowRef<RPCClient | undefined>>,
+): Promisify<BasePlugin & PluginInterfaces> {
+  const proxies = new WeakMap<RPCClient, Promisify<BasePlugin & PluginInterfaces>>();
+  return new Proxy(main, {
+    get(_target, prop) {
+      const client = liveBulkClient(lane);
+      if (!client) return Reflect.get(main, prop);
+      let proxy = proxies.get(client);
+      if (!proxy) {
+        proxy = client.createProxy<BasePlugin & PluginInterfaces>(namespace);
+        proxies.set(client, proxy);
+      }
+      const member: unknown = Reflect.get(proxy, prop);
+      return typeof member === 'function' ? watchTimeouts(member, lane, client) : member;
+    },
+  });
+}
+
+function watchTimeouts<T extends object>(member: T, lane: Readonly<ShallowRef<RPCClient | undefined>>, client: RPCClient): T {
+  return new Proxy(member, {
+    apply(target, thisArg, args) {
+      const result: unknown = Reflect.apply(target as (...args: unknown[]) => unknown, thisArg, args);
+      if (!(result instanceof Promise)) return result;
+      return result.catch((err: unknown) => {
+        if ((err as { code?: unknown } | null)?.code === 'TIMEOUT') noticeBulkTimeout(lane, client);
+        throw err;
+      });
+    },
+  });
+}
+
+export async function ensureStatusSubscription(rpc: Readonly<ShallowRef<RPCClient | undefined>>): Promise<void> {
   const client = rpc.value;
   if (!client || client === statusClient) return;
 
@@ -122,8 +221,10 @@ async function ensureStatusSubscription(rpc: Readonly<ShallowRef<RPCClient | und
   }
 }
 
-export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn {
-  const { rpc, isConnected } = useCameraUi();
+export function usePlugin(pluginName: MaybeRefOrGetter<string>, options: UsePluginOptions = {}): UsePluginReturn {
+  const ctx = useCameraUi();
+  const { rpc, bulkRpc, isConnected } = ctx;
+  const lane = options.lane === 'bulk' ? bulkRpc : undefined;
 
   const plugin = shallowRef<Promisify<BasePlugin & PluginInterfaces> | undefined>();
   const contract = ref<PluginContract | undefined>();
@@ -132,6 +233,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
   const error = ref<Error | undefined>();
 
   let currentPluginName: string | undefined;
+  let heldPlugin: CachedPlugin | undefined;
   let watchedName: string | undefined;
 
   function acquirePlugin(name: string): CachedPlugin | undefined {
@@ -144,7 +246,8 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
   }
 
   function releasePlugin(name: string): void {
-    pluginCache.release(name);
+    pluginCache.release(name, heldPlugin);
+    heldPlugin = undefined;
   }
 
   function watchPlugin(name: string): void {
@@ -186,7 +289,9 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
 
   function adopt(name: string, cached: CachedPlugin): void {
     currentPluginName = name;
-    plugin.value = cached.proxy;
+    heldPlugin = cached;
+    if (lane) cached.bulkProxy ??= createLaneProxy(cached.namespace, cached.proxy, lane);
+    plugin.value = lane ? cached.bulkProxy : cached.proxy;
     contract.value = cached.contract;
     error.value = undefined;
     stopRetry(name);
@@ -208,8 +313,9 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
 
     // the plugin went down: the cache entry is dropped while this instance
     // still holds its ref, so re-resolve instead of handing out the dead proxy
-    if (currentPluginName === name && !pluginCache.has(name)) {
+    if (currentPluginName === name && pluginCache.get(name) !== heldPlugin) {
       currentPluginName = undefined;
+      heldPlugin = undefined;
       plugin.value = undefined;
       contract.value = undefined;
     } else if (currentPluginName === name && plugin.value) {
@@ -264,12 +370,14 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
         return undefined;
       }
 
-      const pluginNamespaces = NamespaceManager.pluginNamespaces(pluginInfo.id);
-      const proxy = client.createProxy<BasePlugin & PluginInterfaces>(pluginNamespaces.pluginChildRpc);
+      const namespace = NamespaceManager.pluginNamespaces(pluginInfo.id).pluginChildRpc;
+      const proxy = client.createProxy<BasePlugin & PluginInterfaces>(namespace);
 
       return {
         proxy,
         contract: pluginInfo.contract,
+        namespace,
+        client,
       };
     });
 
@@ -277,13 +385,14 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
 
     try {
       const result = await loadPromise;
+      pluginRunning.set(name, !!result);
       if (result) {
-        pluginCache.acquire(name, () => result);
+        const held = pluginCache.acquire(name, () => result);
         if (toValue(pluginName) !== name) {
-          pluginCache.release(name);
+          pluginCache.release(name, held);
           return;
         }
-        adopt(name, result);
+        adopt(name, held);
       } else if (toValue(pluginName) === name) {
         markUnavailable(name);
       }
@@ -302,10 +411,11 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
     if (!name) return;
 
     if (currentPluginName) {
-      if (pluginCache.getRefCount(currentPluginName) <= 1) {
+      if (pluginCache.get(currentPluginName) === heldPlugin && pluginCache.getRefCount(currentPluginName) <= 1) {
         pluginCache.forceRelease(currentPluginName);
+        heldPlugin = undefined;
       } else {
-        pluginCache.release(currentPluginName);
+        releasePlugin(currentPluginName);
       }
       plugin.value = undefined;
       contract.value = undefined;
@@ -320,19 +430,23 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
     plugin.value = undefined;
     contract.value = undefined;
     currentPluginName = undefined;
+    heldPlugin = undefined;
   };
   instances.add(resetInstance);
 
+  function onReconnected(): void {
+    if (currentPluginName) checkPlugin(currentPluginName, rpc);
+  }
+  ctx.on('reconnected', onReconnected);
+
   watch(
     [isConnected, () => toValue(pluginName), rpc],
-    async ([connected, name, currentClient], oldValues) => {
-      const prevClient = oldValues?.[2];
-      // Identity-change on the underlying RPCClient (transport rebuild after
-      // an endpoint swap) — release any cached proxy bound to the previous
-      // client before re-acquiring against the new one. Without this, the
-      // watch sees no change in [isConnected, pluginName] and the stale
-      // proxy lingers.
-      if (currentPluginName && prevClient && prevClient !== currentClient) {
+    async ([connected, name, currentClient]) => {
+      // a short drop clears rpc and brings the same client back, its proxies keep working;
+      // a proxy from another client answers nothing
+      const renamed = !!currentPluginName && name !== currentPluginName;
+      if (currentPluginName && (renamed || (currentClient && heldPlugin && heldPlugin.client !== currentClient))) {
+        if (renamed) unwatchPlugin(currentPluginName);
         releasePlugin(currentPluginName);
         plugin.value = undefined;
         contract.value = undefined;
@@ -340,7 +454,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
       }
       if (connected && name && currentClient) {
         await loadPlugin(name);
-      } else if ((!connected || !currentClient) && currentPluginName) {
+      } else if (!connected && currentPluginName) {
         unwatchPlugin(currentPluginName);
         releasePlugin(currentPluginName);
         plugin.value = undefined;
@@ -353,6 +467,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>): UsePluginReturn
 
   tryOnScopeDispose(() => {
     instances.delete(resetInstance);
+    ctx.off('reconnected', onReconnected);
     unwatchPlugin(toValue(pluginName));
     if (currentPluginName) {
       unwatchPlugin(currentPluginName);

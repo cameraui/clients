@@ -23,6 +23,7 @@ export type CameraUiEventCallback = () => void;
 
 export interface CameraUiContext {
   rpc: ShallowRef<RPCClient | undefined>;
+  bulkRpc?: ShallowRef<RPCClient | undefined>;
   target: Readonly<Ref<ConnectionTarget | null>>;
   isConnected: Readonly<Ref<boolean>>;
   endpoint: Readonly<Ref<string | undefined>>;

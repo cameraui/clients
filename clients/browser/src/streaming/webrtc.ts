@@ -81,18 +81,17 @@ export interface WebRTCHandlerOptions {
 
 export interface WebRTCHandler {
   readonly pc: RTCPeerConnection | null;
-  readonly micTransceiver: RTCRtpTransceiver | null;
   readonly isConnected: boolean;
   createOffer: () => Promise<string | undefined>;
   handleAnswer: (sdp: string) => Promise<void>;
   handleCandidate: (candidate: string) => Promise<void>;
-  setMicrophoneTrack: (track: MediaStreamTrack | null) => Promise<void>;
   close: () => void;
 }
 
 export interface BackchannelHandlerOptions {
+  filterUdp: boolean;
   onConnected: () => void;
-  onDisconnected: () => void;
+  onFailed: () => void;
   onCandidate: (candidate: string) => void;
   signal: AbortSignal;
 }
@@ -147,7 +146,6 @@ export function createWebRTCHandler(options: WebRTCHandlerOptions): WebRTCHandle
 
     peerConnection.addTransceiver('video', { direction: 'recvonly' });
     peerConnection.addTransceiver('audio', { direction: 'recvonly' });
-    state.micTransceiver = peerConnection.addTransceiver('audio', { direction: 'sendonly' });
 
     return peerConnection;
   }
@@ -173,22 +171,18 @@ export function createWebRTCHandler(options: WebRTCHandlerOptions): WebRTCHandle
     get pc() {
       return state.pc;
     },
-    get micTransceiver() {
-      return state.micTransceiver;
-    },
     get isConnected() {
       return state.isConnected;
     },
     createOffer,
     handleAnswer: (sdp: string) => handleSdpAnswer(state.pc, signal, sdp),
     handleCandidate: (candidate: string) => handleIceCandidate(state.pc, signal, candidate, filterUdp),
-    setMicrophoneTrack: (track: MediaStreamTrack | null) => setMicTrack(state.micTransceiver, signal, track),
     close,
   };
 }
 
 export function createBackchannelHandler(options: BackchannelHandlerOptions): BackchannelHandler {
-  const { onConnected, onDisconnected, onCandidate, signal } = options;
+  const { filterUdp, onConnected, onFailed, onCandidate, signal } = options;
 
   const state: BasePeerConnectionState = {
     pc: null,
@@ -196,8 +190,24 @@ export function createBackchannelHandler(options: BackchannelHandlerOptions): Ba
     isConnected: false,
   };
 
+  // go2rtc applies a candidate to the socket's last answered peer, one sent before this answer would reach an older peer
+  let answered = false;
+  const heldCandidates: string[] = [];
+
+  function sendCandidate(candidate: string): void {
+    if (answered) onCandidate(candidate);
+    else heldCandidates.push(candidate);
+  }
+
+  async function handleAnswer(sdp: string): Promise<void> {
+    if (signal.aborted || !state.pc) return;
+    answered = true;
+    for (const candidate of heldCandidates.splice(0)) onCandidate(candidate);
+    await state.pc.setRemoteDescription({ type: 'answer', sdp });
+  }
+
   function createPeerConnection(): RTCPeerConnection {
-    const peerConnection = createBasePeerConnection(signal, onCandidate, false);
+    const peerConnection = createBasePeerConnection(signal, sendCandidate, filterUdp);
 
     peerConnection.onconnectionstatechange = () => {
       if (signal.aborted) return;
@@ -207,9 +217,11 @@ export function createBackchannelHandler(options: BackchannelHandlerOptions): Ba
       if (connectionState === 'connected') {
         state.isConnected = true;
         onConnected();
-      } else if (connectionState === 'disconnected' || connectionState === 'failed') {
+      } else if (connectionState === 'disconnected') {
         state.isConnected = false;
-        onDisconnected();
+      } else if (connectionState === 'failed') {
+        state.isConnected = false;
+        onFailed();
       }
     };
 
@@ -240,8 +252,8 @@ export function createBackchannelHandler(options: BackchannelHandlerOptions): Ba
       return state.isConnected;
     },
     createOffer,
-    handleAnswer: (sdp: string) => handleSdpAnswer(state.pc, signal, sdp),
-    handleCandidate: (candidate: string) => handleIceCandidate(state.pc, signal, candidate, false),
+    handleAnswer,
+    handleCandidate: (candidate: string) => handleIceCandidate(state.pc, signal, candidate, filterUdp),
     setMicrophoneTrack: (track: MediaStreamTrack | null) => setMicTrack(state.micTransceiver, signal, track),
     close,
   };

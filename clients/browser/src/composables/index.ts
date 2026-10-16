@@ -67,7 +67,7 @@ export type { UseCameraByIdReturn } from './useCameraById.js';
 export type { CameraStream, UseCameraStreamOptions } from './useCameraStream.js';
 export type { UseCuiFullscreenOptions, UseCuiFullscreenReturn } from './useFullscreen.js';
 export type { UseOAuthReturn } from './useOAuth.js';
-export type { UsePluginReturn } from './usePlugin.js';
+export type { UsePluginOptions, UsePluginReturn } from './usePlugin.js';
 export type { RpcCallOptions, UseRpcCallOptions, UseRpcCallReturn, UseRpcSubscriptionOptions, UseRpcSubscriptionReturn } from './useRpc.js';
 export type {
   CameraIdentifier,

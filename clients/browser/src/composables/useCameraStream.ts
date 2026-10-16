@@ -4,6 +4,7 @@ import { computed, onBeforeUnmount, ref, shallowRef, toValue, watch } from 'vue'
 import { createActivityMode } from '../streaming/activityMode.js';
 import { createStreamConnection } from '../streaming/streamConnection.js';
 import { streamManager } from '../streaming/streamManager.js';
+import { isVideoInPictureInPicture } from '../streaming/utils.js';
 import { useCameraById } from './useCameraById.js';
 import { useCameraUi } from './useCameraUi.js';
 import { useCuiFullscreen } from './useFullscreen.js';
@@ -18,6 +19,9 @@ import type { ReactiveCameraDevice } from '../types.js';
 
 const AUTO_STAGGER_STEP_MS = 75;
 const AUTO_STAGGER_RESET_MS = 500;
+const OFFSCREEN_STOP_DELAY_MS = 10_000;
+const HAVE_CURRENT_DATA = 2;
+const EMPTY_POSTER = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
 let autoStaggerIndex = 0;
 let autoStaggerLastTouch = 0;
 
@@ -40,6 +44,7 @@ function isElementVisible(el: HTMLElement | null | undefined): boolean {
 export interface CameraStream {
   readonly status: Ref<StreamStatus>;
   readonly isPlaying: Ref<boolean>;
+  readonly stalled: Ref<boolean>;
   readonly activeMode: Ref<'webrtc' | 'webrtc/tcp' | 'mse'>;
   readonly activeResolution: Ref<StreamingRole>;
   readonly degradedFrom: Ref<StreamingRole | null>;
@@ -150,7 +155,13 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   const nativeWidth = ref(0);
   const nativeHeight = ref(0);
   const isPip = ref(false);
+  const keepAwake = ref(false);
+  const offscreen = ref(false);
   const autoStartReady = ref(startDelay <= 0);
+  let offscreenTimer: ReturnType<typeof setTimeout> | undefined;
+  let resumeTimer: ReturnType<typeof setTimeout> | undefined;
+  let stoppedOffscreen = false;
+  let seenInViewport = false;
 
   if (startDelay > 0) {
     startDelayTimer = setTimeout(() => {
@@ -169,6 +180,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   const isCameraDisabled = computed(() => cameraDeviceRef.value?.disabled.value === true);
   const status = computed<StreamStatus>(() => currentStream.value?.status.value ?? 'idle');
   const isPlaying = computed(() => currentStream.value?.isPlaying.value ?? false);
+  const stalled = computed(() => currentStream.value?.stalled?.value ?? false);
   const activeMode = computed<'webrtc' | 'webrtc/tcp' | 'mse'>(() => currentStream.value?.activeMode.value ?? 'webrtc');
   const activeResolution = computed<StreamingRole>(() => currentStream.value?.activeResolution.value ?? 'low-resolution');
   const degradedFrom = computed(() => currentStream.value?.degradedFrom.value ?? null);
@@ -190,7 +202,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     initialMode: toValue(options.activityMode) ?? 'always-on',
     config: activityConfig,
     onStreamStart: () => {
-      if (!isCameraDisabled.value) currentStream.value?.start();
+      if (!isCameraDisabled.value && !deferUntilSeen()) currentStream.value?.start();
     },
     onStreamStop: () => {
       if (isUsingCachedStream.value) {
@@ -225,7 +237,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     video.muted = true;
     video.disablePictureInPicture = false;
     video.preload = 'auto';
-    video.poster = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=';
+    video.poster = EMPTY_POSTER;
     video.style.position = 'absolute';
     video.style.width = '100%';
     video.style.height = '100%';
@@ -265,6 +277,86 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   function onLeavePip(): void {
     isPip.value = false;
   }
+  function onPresentationModeChange(): void {
+    isPip.value = isVideoInPictureInPicture(videoElement.value);
+  }
+
+  function isRunning(): boolean {
+    return status.value !== 'idle' && status.value !== 'closed' && status.value !== 'unsupported';
+  }
+
+  function capturePoster(): void {
+    const video = videoElement.value;
+    if (!video || video.readyState < HAVE_CURRENT_DATA || !video.videoWidth || !video.videoHeight) return;
+    const tileWidth = Math.round((containerElement.value?.clientWidth || video.videoWidth) * (globalThis.devicePixelRatio || 1));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.min(video.videoWidth, tileWidth);
+    canvas.height = Math.round((video.videoHeight * canvas.width) / video.videoWidth);
+    try {
+      canvas.getContext('2d')?.drawImage(video, 0, 0, canvas.width, canvas.height);
+      video.poster = canvas.toDataURL('image/jpeg', 0.8);
+    } catch {
+      // a frame the canvas may not read keeps the empty poster
+    }
+  }
+
+  function clearOffscreenTimer(): void {
+    clearTimeout(offscreenTimer);
+    offscreenTimer = undefined;
+  }
+
+  function clearResumeTimer(): void {
+    clearTimeout(resumeTimer);
+    resumeTimer = undefined;
+  }
+
+  function syncOffscreen(): void {
+    if (!offscreen.value) {
+      clearOffscreenTimer();
+      if (stoppedOffscreen) scheduleResume();
+      return;
+    }
+    clearResumeTimer();
+    if (isPip.value || keepAwake.value || paused.value || !isRunning()) {
+      clearOffscreenTimer();
+      return;
+    }
+    offscreenTimer ??= setTimeout(stopOffscreen, seenInViewport ? OFFSCREEN_STOP_DELAY_MS : 0);
+  }
+
+  function deferUntilSeen(): boolean {
+    if (!offscreen.value || seenInViewport) return false;
+    stoppedOffscreen = true;
+    return true;
+  }
+
+  function stopOffscreen(): void {
+    offscreenTimer = undefined;
+    if (!offscreen.value || isPip.value || keepAwake.value || paused.value || activityModeManager.inStandby.value || !isRunning()) return;
+    // a shared video may have entered picture-in-picture before this consumer listened
+    if (isVideoInPictureInPicture(videoElement.value)) {
+      isPip.value = true;
+      return;
+    }
+    // a stream another consumer still holds keeps running until that one lets go
+    if (registeredCamName && streamManager.getRefCount(registeredCamName) > 1) {
+      offscreenTimer = setTimeout(stopOffscreen, OFFSCREEN_STOP_DELAY_MS);
+      return;
+    }
+    capturePoster();
+    currentStream.value?.stop();
+    stoppedOffscreen = true;
+  }
+
+  function scheduleResume(): void {
+    resumeTimer ??= setTimeout(() => {
+      resumeTimer = undefined;
+      if (offscreen.value || !stoppedOffscreen) return;
+      stoppedOffscreen = false;
+      if (isCameraDisabled.value || !shouldAutoStart() || activityModeManager.inStandby.value) return;
+      if (status.value === 'idle' || status.value === 'closed') currentStream.value?.start();
+    }, acquireAutoStaggerDelay());
+  }
 
   function initializeIsolated(): void {
     if (initialized.value) return;
@@ -277,12 +369,13 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     initialized.value = true;
     isUsingCachedStream.value = false;
     currentStream.value = ownedStream;
+    cleanupFns.push(streamManager.track(ownedStream));
 
     const video = createVideoElement();
     videoElement.value = video;
     streamVideoElementRef.value = video;
 
-    if (shouldAutoStart() && autoStartReady.value && activityModeManager.mode.value === 'always-on' && !isCameraDisabled.value) {
+    if (shouldAutoStart() && autoStartReady.value && activityModeManager.mode.value === 'always-on' && !isCameraDisabled.value && !deferUntilSeen()) {
       ownedStream.start();
     }
   }
@@ -365,7 +458,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
 
       setupCachedStreamWatchers(cached.stream, video, camName);
 
-      if (shouldAutoStart() && autoStartReady.value && activityModeManager.mode.value === 'always-on' && !isCameraDisabled.value) {
+      if (shouldAutoStart() && autoStartReady.value && activityModeManager.mode.value === 'always-on' && !isCameraDisabled.value && !deferUntilSeen()) {
         if (cached.stream.activeMode.value !== 'mse') {
           attachCachedStream(cached, video, camName);
         } else {
@@ -384,7 +477,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
 
       streamManager.register(camName, ownedStream, streamVideoElementRef, cameraDeviceRef, containerElement, video);
 
-      if (shouldAutoStart() && autoStartReady.value && activityModeManager.mode.value === 'always-on' && !isCameraDisabled.value) {
+      if (shouldAutoStart() && autoStartReady.value && activityModeManager.mode.value === 'always-on' && !isCameraDisabled.value && !deferUntilSeen()) {
         ownedStream.start();
       }
 
@@ -557,6 +650,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   }
 
   function setKeepAwake(awake: boolean): void {
+    keepAwake.value = awake;
     activityModeManager.setKeepAwake(awake);
   }
 
@@ -600,6 +694,8 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
       clearTimeout(startDelayTimer);
       startDelayTimer = undefined;
     }
+    clearOffscreenTimer();
+    clearResumeTimer();
 
     // Immediately mute audio — stream may continue running (cached/debounced)
     // but the user should not hear audio from an unmounted component.
@@ -669,7 +765,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     }
   }
 
-  if (!isolated && typeof IntersectionObserver !== 'undefined') {
+  if (typeof IntersectionObserver !== 'undefined') {
     let visibilityObserver: IntersectionObserver | undefined;
     const stopVisibilityWatch = watch(
       containerElement,
@@ -677,15 +773,26 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
         visibilityObserver?.disconnect();
         visibilityObserver = undefined;
         if (!container) return;
+        // about one tile ahead, so a returning tile reconnects before it shows; scrollMargin extends it into scrolling grids
+        const tileHeight = Math.round(container.getBoundingClientRect().height);
+        const margin = tileHeight > 0 ? `${tileHeight}px 0px` : '25% 0px';
+        const init: IntersectionObserverInit & { scrollMargin?: string } = { rootMargin: margin, scrollMargin: margin };
         visibilityObserver = new IntersectionObserver((entries) => {
-          if (entries.some((e) => e.isIntersecting)) reclaimSharedVideo();
-        });
+          const entry = entries[entries.length - 1];
+          if (!entry) return;
+          offscreen.value = !entry.isIntersecting;
+          if (!entry.isIntersecting) return;
+          seenInViewport = true;
+          reclaimSharedVideo();
+        }, init);
         visibilityObserver.observe(container);
       },
       { immediate: true },
     );
+    const stopOffscreenWatch = watch([offscreen, status, isPip, keepAwake, paused], syncOffscreen);
     cleanupFns.push(() => {
       stopVisibilityWatch();
+      stopOffscreenWatch();
       visibilityObserver?.disconnect();
     });
   }
@@ -778,10 +885,12 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
       if (oldVideo) {
         oldVideo.removeEventListener('enterpictureinpicture', onEnterPip);
         oldVideo.removeEventListener('leavepictureinpicture', onLeavePip);
+        oldVideo.removeEventListener('webkitpresentationmodechanged', onPresentationModeChange);
       }
       if (video) {
         video.addEventListener('enterpictureinpicture', onEnterPip);
         video.addEventListener('leavepictureinpicture', onLeavePip);
+        video.addEventListener('webkitpresentationmodechanged', onPresentationModeChange);
       }
     },
     { immediate: true },
@@ -811,7 +920,8 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
         activityModeManager.mode.value === 'always-on' &&
         !isPlaying.value &&
         status.value === 'idle' &&
-        !isCameraDisabled.value
+        !isCameraDisabled.value &&
+        !deferUntilSeen()
       ) {
         // startDelay elapsed after initialize — trigger the deferred auto-start.
         // Gated on always-on like the initialize paths: standby/activity
@@ -835,7 +945,10 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   );
 
   watch(isPlaying, (playing) => {
-    if (playing) activityModeManager.resetIdleTimer();
+    if (!playing) return;
+    activityModeManager.resetIdleTimer();
+    const video = videoElement.value;
+    if (video && video.poster !== EMPTY_POSTER) video.poster = EMPTY_POSTER;
   });
 
   watch(isCameraDisabled, (disabled, wasDisabled) => {
@@ -855,6 +968,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   return {
     status,
     isPlaying,
+    stalled,
     activeMode,
     activeResolution,
     degradedFrom,

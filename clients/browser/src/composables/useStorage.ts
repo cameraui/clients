@@ -1,10 +1,12 @@
+import { isNoRespondersError } from '@camera.ui/rpc';
 import { tryOnScopeDispose } from '@vueuse/core';
 import { computed, ref, shallowRef, toValue, watch } from 'vue';
 
 import { NamespaceManager } from '../server/index.js';
 import { createDebouncedCache } from '../utils/createDebouncedCache.js';
-import { clearPluginIdCache, resolvePluginId } from './resolvePluginId.js';
+import { clearPluginIdCache, forgetPluginId, pluginNameOf, resolvePluginId } from './resolvePluginId.js';
 import { useCameraUi } from './useCameraUi.js';
+import { ensureStatusSubscription, isPluginStopped, onPluginStatus } from './usePlugin.js';
 import { extractCameraId } from './utils.js';
 
 import type { Promisify, RPCClient } from '@camera.ui/rpc';
@@ -158,8 +160,8 @@ function acquireStorage(key: string, client: RPCClient, createProxy: () => Promi
   return storageCache.acquire(key, () => createReactiveStorage(createProxy(), client));
 }
 
-function releaseStorage(key: string): void {
-  storageCache.release(key);
+function releaseStorage(key: string, storage: ReactiveStorage | undefined): void {
+  storageCache.release(key, storage);
 }
 
 export function clearStorageCache(): void {
@@ -167,21 +169,49 @@ export function clearStorageCache(): void {
   clearPluginIdCache();
 }
 
+interface ConfigLoad {
+  key: string | undefined;
+  result: Promise<SchemaConfig | undefined>;
+  settle: (config: SchemaConfig | undefined) => void;
+  storage: ReactiveStorage | undefined;
+  retries: number;
+  rebound: boolean;
+  timer: ReturnType<typeof setTimeout> | undefined;
+}
+
+interface PluginStatusSource {
+  rpc: Readonly<ShallowRef<RPCClient | undefined>>;
+  pluginName: () => string | undefined;
+}
+
 interface StorageComposableState {
   currentStorageKey: string | undefined;
   cachedStorage: ReactiveStorage | undefined;
+  load: ConfigLoad | undefined;
+  disposed: boolean;
 }
 
 function createStorageState(): StorageComposableState {
   return {
     currentStorageKey: undefined,
     cachedStorage: undefined,
+    load: undefined,
+    disposed: false,
   };
 }
 
+function endLoad(state: StorageComposableState, config: SchemaConfig | undefined): void {
+  const load = state.load;
+  if (!load) return;
+  clearTimeout(load.timer);
+  state.load = undefined;
+  load.settle(config);
+}
+
 function cleanupStorage(state: StorageComposableState, isConnected: Ref<boolean>, config: ShallowRef<SchemaConfig | undefined>): void {
+  endLoad(state, undefined);
   if (state.currentStorageKey) {
-    releaseStorage(state.currentStorageKey);
+    releaseStorage(state.currentStorageKey, state.cachedStorage);
     state.currentStorageKey = undefined;
   }
   isConnected.value = false;
@@ -199,7 +229,7 @@ function bindStorage(
   if (state.currentStorageKey === storageKey && state.cachedStorage?.client === client) return;
 
   if (state.currentStorageKey && state.currentStorageKey !== storageKey) {
-    releaseStorage(state.currentStorageKey);
+    releaseStorage(state.currentStorageKey, state.cachedStorage);
     // the previous plugin's form must not stay on screen while the next one loads
     config.value = undefined;
   }
@@ -210,49 +240,102 @@ function bindStorage(
 
 const GET_CONFIG_RETRY_DELAYS = [2_000, 5_000, 10_000, 15_000, 15_000, 15_000, 15_000, 15_000];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+function createStorageOperations(
+  state: StorageComposableState,
+  config: ShallowRef<SchemaConfig | undefined>,
+  isLoading: Ref<boolean>,
+  error: Ref<Error | undefined>,
+  rebind?: () => Promise<boolean>,
+  status?: PluginStatusSource,
+) {
+  let visibleAttempts = 0;
 
-function createStorageOperations(state: StorageComposableState, config: ShallowRef<SchemaConfig | undefined>, isLoading: Ref<boolean>, error: Ref<Error | undefined>) {
-  let inflightGetConfig: Promise<SchemaConfig | undefined> | undefined;
-  let inflightStorage: ReactiveStorage | undefined;
+  if (status) tryOnScopeDispose(onPluginStatus(onStatus));
 
-  function getConfig(): Promise<SchemaConfig | undefined> {
-    if (!inflightGetConfig || inflightStorage !== state.cachedStorage) {
-      inflightStorage = state.cachedStorage;
-      const request = getConfigWithRetry().finally(() => {
-        if (inflightGetConfig === request) {
-          inflightGetConfig = undefined;
-          inflightStorage = undefined;
-        }
-      });
-      inflightGetConfig = request;
+  function onStatus(pluginName: string, running: boolean): void {
+    if (pluginName !== status?.pluginName()) return;
+    if (!running) {
+      if (state.load?.timer) endLoad(state, undefined);
+    } else if (state.load || error.value) {
+      getConfig();
     }
-    return inflightGetConfig;
   }
 
-  async function getConfigWithRetry(): Promise<SchemaConfig | undefined> {
-    const cached = state.cachedStorage;
-    if (!cached) return undefined;
+  // the first failure shows at once and the retries after it run quietly, the promise settles with the final outcome
+  function getConfig(): Promise<SchemaConfig | undefined> {
+    if (!state.cachedStorage) return Promise.resolve(undefined);
+    if (status) ensureStatusSubscription(status.rpc);
+    if (state.load && state.load.key !== state.currentStorageKey) endLoad(state, undefined);
 
-    isLoading.value = true;
+    const load = state.load ?? startLoad();
+    load.retries = 0;
+    load.rebound = false;
+    if (load.storage !== state.cachedStorage) {
+      clearTimeout(load.timer);
+      load.timer = undefined;
+      attempt(load, true);
+    }
+    return load.result;
+  }
+
+  function startLoad(): ConfigLoad {
+    let settle!: (config: SchemaConfig | undefined) => void;
+    const result = new Promise<SchemaConfig | undefined>((resolve) => (settle = resolve));
+    const load: ConfigLoad = { key: state.currentStorageKey, result, settle, storage: undefined, retries: 0, rebound: false, timer: undefined };
+    state.load = load;
+    return load;
+  }
+
+  async function attempt(load: ConfigLoad, visible: boolean): Promise<void> {
+    const cached = state.cachedStorage;
+    if (!cached) {
+      endLoad(state, undefined);
+      return;
+    }
+
+    load.storage = cached;
+    if (visible) {
+      visibleAttempts++;
+      isLoading.value = true;
+    }
     try {
-      let result = await cached.getConfig();
-      for (const delay of GET_CONFIG_RETRY_DELAYS) {
-        if (!cached.error.value || state.cachedStorage !== cached) break;
-        await sleep(delay);
-        if (state.cachedStorage !== cached) break;
-        result = await cached.getConfig();
+      const result = await cached.getConfig();
+      if (state.load !== load || state.cachedStorage !== cached) return;
+
+      if (rebind && !load.rebound && isNoRespondersError(cached.error.value)) {
+        load.rebound = true;
+        if (await rebind()) {
+          if (state.load !== load) return;
+          load.key = state.currentStorageKey;
+          await attempt(load, visible);
+          return;
+        }
+        if (state.load !== load || state.cachedStorage !== cached) return;
       }
-      if (state.cachedStorage !== cached) return result;
 
       config.value = cached.config.value;
       error.value = cached.error.value;
-      return result;
+      if (cached.error.value) scheduleRetry(load);
+      else endLoad(state, result);
     } finally {
-      isLoading.value = false;
+      if (load.storage === cached) load.storage = undefined;
+      if (visible && --visibleAttempts === 0) isLoading.value = false;
     }
+  }
+
+  function scheduleRetry(load: ConfigLoad): void {
+    const pluginName = status?.pluginName();
+    // the error is on screen, the next running status or reconnect loads again
+    const delay = pluginName && isPluginStopped(pluginName) ? undefined : GET_CONFIG_RETRY_DELAYS[load.retries++];
+    if (delay === undefined) {
+      endLoad(state, undefined);
+      return;
+    }
+    load.timer = setTimeout(() => {
+      load.timer = undefined;
+      if (load.key === state.currentStorageKey) attempt(load, false);
+      else endLoad(state, undefined);
+    }, delay);
   }
 
   async function setValue<T = unknown>(key: string, value: T): Promise<void> {
@@ -336,7 +419,14 @@ export function usePluginStorage(pluginName: MaybeRefOrGetter<string>): UseStora
   const isConnected = ref(false);
   const state = createStorageState();
 
-  const operations = createStorageOperations(state, config, _isLoading, error);
+  const operations = createStorageOperations(state, config, _isLoading, error, rebind, { rpc, pluginName: () => toValue(pluginName) });
+
+  function bind(pluginId: string, client: RPCClient): void {
+    bindStorage(state, getPluginStorageKey(pluginId), client, config, () => {
+      const namespaces = NamespaceManager.pluginNamespaces(pluginId);
+      return client.createProxy<StorageRPC>(namespaces.pluginStorageRpc);
+    });
+  }
 
   async function connect(name: string): Promise<boolean> {
     const client = rpc.value;
@@ -344,15 +434,12 @@ export function usePluginStorage(pluginName: MaybeRefOrGetter<string>): UseStora
 
     try {
       const pluginId = await resolvePluginId(rpc, name);
+      if (state.disposed) return false;
       if (!pluginId) {
         throw new Error(`Plugin "${name}" not found`);
       }
 
-      bindStorage(state, getPluginStorageKey(pluginId), client, config, () => {
-        const namespaces = NamespaceManager.pluginNamespaces(pluginId);
-        return client.createProxy<StorageRPC>(namespaces.pluginStorageRpc);
-      });
-
+      bind(pluginId, client);
       isConnected.value = true;
       return true;
     } catch (err) {
@@ -360,6 +447,18 @@ export function usePluginStorage(pluginName: MaybeRefOrGetter<string>): UseStora
       isConnected.value = false;
       return false;
     }
+  }
+
+  async function rebind(): Promise<boolean> {
+    const name = toValue(pluginName);
+    const storage = state.cachedStorage;
+    if (!name || !storage) return false;
+    forgetPluginId(name);
+    const pluginId = await resolvePluginId(rpc, name).catch(() => undefined);
+    if (!pluginId || state.disposed || state.cachedStorage !== storage) return false;
+    const key = state.currentStorageKey;
+    bind(pluginId, storage.client);
+    return state.currentStorageKey !== key;
   }
 
   async function getConfig(): Promise<SchemaConfig | undefined> {
@@ -388,6 +487,7 @@ export function usePluginStorage(pluginName: MaybeRefOrGetter<string>): UseStora
   cameraUi.on('reconnected', sync);
 
   tryOnScopeDispose(() => {
+    state.disposed = true;
     cameraUi.off('reconnected', sync);
     cleanupStorage(state, isConnected, config);
   });
@@ -415,7 +515,14 @@ export function useCameraStorage(camera: CameraIdentifier, pluginName: MaybeRefO
   const isConnected = ref(false);
   const state = createStorageState();
 
-  const operations = createStorageOperations(state, config, _isLoading, error);
+  const operations = createStorageOperations(state, config, _isLoading, error, rebind, { rpc, pluginName: () => toValue(pluginName) });
+
+  function bind(pluginId: string, cameraId: string, client: RPCClient): void {
+    bindStorage(state, getCameraStorageKey(pluginId, cameraId), client, config, () => {
+      const namespaces = NamespaceManager.pluginCameraNamespaces(pluginId, cameraId);
+      return client.createProxy<StorageRPC>(namespaces.cameraStorageRpc);
+    });
+  }
 
   async function connect(cameraId: string, name: string): Promise<boolean> {
     const client = rpc.value;
@@ -423,15 +530,12 @@ export function useCameraStorage(camera: CameraIdentifier, pluginName: MaybeRefO
 
     try {
       const pluginId = await resolvePluginId(rpc, name);
+      if (state.disposed) return false;
       if (!pluginId) {
         throw new Error(`Plugin "${name}" not found`);
       }
 
-      bindStorage(state, getCameraStorageKey(pluginId, cameraId), client, config, () => {
-        const namespaces = NamespaceManager.pluginCameraNamespaces(pluginId, cameraId);
-        return client.createProxy<StorageRPC>(namespaces.cameraStorageRpc);
-      });
-
+      bind(pluginId, cameraId, client);
       isConnected.value = true;
       return true;
     } catch (err) {
@@ -439,6 +543,19 @@ export function useCameraStorage(camera: CameraIdentifier, pluginName: MaybeRefO
       isConnected.value = false;
       return false;
     }
+  }
+
+  async function rebind(): Promise<boolean> {
+    const cameraId = extractCameraId(toValue(camera));
+    const name = toValue(pluginName);
+    const storage = state.cachedStorage;
+    if (!cameraId || !name || !storage) return false;
+    forgetPluginId(name);
+    const pluginId = await resolvePluginId(rpc, name).catch(() => undefined);
+    if (!pluginId || state.disposed || state.cachedStorage !== storage) return false;
+    const key = state.currentStorageKey;
+    bind(pluginId, cameraId, storage.client);
+    return state.currentStorageKey !== key;
   }
 
   async function getConfig(): Promise<SchemaConfig | undefined> {
@@ -470,6 +587,7 @@ export function useCameraStorage(camera: CameraIdentifier, pluginName: MaybeRefO
   cameraUi.on('reconnected', sync);
 
   tryOnScopeDispose(() => {
+    state.disposed = true;
     cameraUi.off('reconnected', sync);
     cleanupStorage(state, isConnected, config);
   });
@@ -497,7 +615,13 @@ export function useSensorStorage(sensorId: MaybeRefOrGetter<string | undefined>,
   const isConnected = ref(false);
   const state = createStorageState();
 
-  const operations = createStorageOperations(state, config, _isLoading, error);
+  const operations = createStorageOperations(state, config, _isLoading, error, undefined, {
+    rpc,
+    pluginName: () => {
+      const plugId = toValue(pluginId);
+      return plugId ? pluginNameOf(plugId) : undefined;
+    },
+  });
 
   function connect(senId: string, plugId: string): boolean {
     const client = rpc.value;
@@ -547,6 +671,7 @@ export function useSensorStorage(sensorId: MaybeRefOrGetter<string | undefined>,
   cameraUi.on('reconnected', sync);
 
   tryOnScopeDispose(() => {
+    state.disposed = true;
     cameraUi.off('reconnected', sync);
     cleanupStorage(state, isConnected, config);
   });

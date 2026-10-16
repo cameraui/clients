@@ -9,6 +9,7 @@ export const STREAM_CONFIG = {
   MSE: {
     BUFFER_SIZE: 2 * 1024 * 1024,
     BUFFER_WINDOW: 5,
+    MAX_BUFFER_WINDOW: 60,
   },
 
   CODECS: {

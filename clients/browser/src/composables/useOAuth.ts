@@ -1,10 +1,13 @@
-import { ref, watch } from 'vue';
+import { isNoRespondersError } from '@camera.ui/rpc';
+import { tryOnScopeDispose } from '@vueuse/core';
+import { ref } from 'vue';
 
 import { NamespaceManager } from '../server/index.js';
-import { resolvePluginId } from './resolvePluginId.js';
+import { forgetPluginId, resolvePluginId } from './resolvePluginId.js';
 import { useCameraUi } from './useCameraUi.js';
 import { rpcCall } from './useRpc.js';
 
+import type { RPCClient } from '@camera.ui/rpc';
 import type { OAuthAuthCodeFlowCapable, OAuthCapable, OAuthDeviceFlowCapable, OAuthMetadata, OAuthState } from '@camera.ui/sdk';
 import type { Ref } from 'vue';
 
@@ -28,11 +31,16 @@ interface OAuthStateEntry {
   metadata: Ref<OAuthMetadata | null>;
   call: <T>(fn: (proxy: OAuthProxy) => Promise<T>) => Promise<T>;
   refresh: () => Promise<void>;
+  apply: (next: OAuthState) => void;
+  retain: () => void;
+  release: () => void;
+  stop: () => void;
 }
 
 const oauthStates = new Map<string, OAuthStateEntry>();
 
 export function clearOAuthCache(): void {
+  for (const entry of oauthStates.values()) entry.stop();
   oauthStates.clear();
 }
 
@@ -40,42 +48,87 @@ function createOAuthState(pluginName: string): OAuthStateEntry {
   const ctx = useCameraUi();
   const state = ref<OAuthState>({ status: 'disconnected' });
   const metadata = ref<OAuthMetadata | null>(null);
-  let timer: ReturnType<typeof setInterval> | null = null;
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let timerMs = 0;
+  let users = 0;
+  let polling = false;
+  let seq = 0;
+  let appliedSeq = 0;
+
+  function proxyFor(rpc: RPCClient, id: string): OAuthProxy {
+    return rpc.createProxy<OAuthProxy>(NamespaceManager.pluginNamespaces(id).pluginChildRpc);
+  }
 
   const call = <T>(fn: (proxy: OAuthProxy) => Promise<T>): Promise<T> =>
     rpcCall(ctx.rpc, async (rpc) => {
       const id = await resolvePluginId(ctx.rpc, pluginName);
       if (!id) throw new Error(`Plugin "${pluginName}" not found`);
-      return fn(rpc.createProxy<OAuthProxy>(NamespaceManager.pluginNamespaces(id).pluginChildRpc));
+      try {
+        return await fn(proxyFor(rpc, id));
+      } catch (err) {
+        if (!isNoRespondersError(err)) throw err;
+        // a reinstalled plugin answers under a new id, nobody received the call under the old one
+        forgetPluginId(pluginName);
+        const freshId = await resolvePluginId(ctx.rpc, pluginName);
+        if (!freshId || freshId === id) throw err;
+        return fn(proxyFor(rpc, freshId));
+      }
     });
 
+  function apply(next: OAuthState, at = ++seq): void {
+    if (at < appliedSeq) return;
+    appliedSeq = at;
+    state.value = next;
+    schedule();
+  }
+
   async function refresh(): Promise<void> {
-    state.value = await call((proxy) => proxy.getOAuthState());
+    const at = ++seq;
+    const next = await call((proxy) => proxy.getOAuthState());
+    apply(next, at);
     if (!metadata.value) {
       metadata.value = await call((proxy) => proxy.getOAuthMetadata());
     }
   }
 
-  function startPolling(intervalMs: number): void {
-    if (timer) clearInterval(timer);
-    timer = setInterval(() => {
-      // A poll failure (plugin restarting, reconnecting) must not kill the
-      // loop — the next tick recovers.
-      refresh().catch(() => undefined);
-    }, intervalMs);
+  function poll(): void {
+    if (polling) return;
+    polling = true;
+    refresh()
+      .catch(() => undefined)
+      .finally(() => {
+        polling = false;
+      });
   }
 
-  watch(
-    () => state.value.status,
-    (status) => {
-      startPolling(status === 'awaiting_user' || status === 'polling' ? POLL_ACTIVE_MS : POLL_IDLE_MS);
-    },
-    { immediate: true },
-  );
+  function schedule(): void {
+    const { status } = state.value;
+    const active = status === 'awaiting_user' || status === 'polling';
+    const ms = users === 0 ? 0 : active ? POLL_ACTIVE_MS : POLL_IDLE_MS;
+    if (ms === timerMs) return;
+    clearInterval(timer);
+    timer = ms ? setInterval(poll, ms) : undefined;
+    timerMs = ms;
+  }
 
-  refresh().catch(() => undefined);
+  function retain(): void {
+    if (users++ > 0) return;
+    schedule();
+    poll();
+  }
 
-  return { state, metadata, call, refresh };
+  function release(): void {
+    if (users === 0) return;
+    users--;
+    schedule();
+  }
+
+  function stop(): void {
+    users = 0;
+    schedule();
+  }
+
+  return { state, metadata, call, refresh, apply, retain, release, stop };
 }
 
 export function useOAuth(pluginName: string): UseOAuthReturn {
@@ -83,14 +136,17 @@ export function useOAuth(pluginName: string): UseOAuthReturn {
     oauthStates.set(pluginName, createOAuthState(pluginName));
   }
   const entry = oauthStates.get(pluginName)!;
-  const { state, metadata, call, refresh } = entry;
+  const { state, metadata, call, refresh, apply } = entry;
+
+  entry.retain();
+  tryOnScopeDispose(entry.release);
 
   async function startDeviceFlow(scope: string[]): Promise<void> {
-    state.value = await call((proxy) => proxy.startDeviceFlow!(scope));
+    apply(await call((proxy) => proxy.startDeviceFlow!(scope)));
   }
 
   async function startAuthCodeFlow(scope: string[]): Promise<void> {
-    state.value = await call((proxy) => proxy.startAuthCodeFlow!(scope));
+    apply(await call((proxy) => proxy.startAuthCodeFlow!(scope)));
   }
 
   async function cancel(): Promise<void> {

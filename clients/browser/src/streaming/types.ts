@@ -35,6 +35,7 @@ export interface ReactiveStream {
   readonly hasAudio: Ref<boolean>;
   readonly hasBackchannel: Ref<boolean>;
   readonly isPlaying: Ref<boolean>;
+  readonly stalled?: Ref<boolean>;
   readonly error: Ref<Error | undefined>;
   readonly probeInfo: Ref<ProbeStream | undefined>;
   readonly muted: Ref<boolean>;
@@ -45,6 +46,7 @@ export interface ReactiveStream {
   start: () => Promise<void>;
   stop: () => void;
   restart: () => Promise<void>;
+  invalidateProbe: () => void;
   setMode: (mode: VideoStreamingMode) => Promise<void>;
   setResolution: (resolution: StreamingRole) => Promise<void>;
   setMicrophone: (track: MediaStreamTrack | null) => Promise<void>;

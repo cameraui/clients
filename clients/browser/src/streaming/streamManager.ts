@@ -24,6 +24,7 @@ export interface StreamManagerConfig {
 
 class StreamManager {
   private streams = new Map<string, CachedStreamEntry>();
+  private standalone = new Set<ReactiveStream>();
   private releaseTimers = new Map<string, NodeJS.Timeout>();
   private readonly releaseDelay: number;
 
@@ -142,6 +143,26 @@ class StreamManager {
     }
   }
 
+  public track(stream: ReactiveStream): () => void {
+    this.standalone.add(stream);
+    return () => {
+      this.standalone.delete(stream);
+    };
+  }
+
+  public restartConnected(): number {
+    const streams = new Set(this.standalone);
+    for (const entry of this.streams.values()) streams.add(entry.stream);
+
+    let restarted = 0;
+    for (const stream of streams) {
+      if (stream.status.value !== 'connected' || stream.paused.value) continue;
+      stream.restart().catch(() => {});
+      restarted++;
+    }
+    return restarted;
+  }
+
   public forceRelease(cameraName: string): void {
     this.cancelRelease(cameraName);
     this.doRelease(cameraName);
@@ -219,4 +240,8 @@ export const streamManager = new StreamManager();
 
 export function createStreamManager(config?: StreamManagerConfig): StreamManager {
   return new StreamManager(config);
+}
+
+export function restartConnectedStreams(): number {
+  return streamManager.restartConnected();
 }

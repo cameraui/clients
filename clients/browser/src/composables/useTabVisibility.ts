@@ -4,7 +4,7 @@ import { computed, ref } from 'vue';
 
 import type { ComputedRef } from 'vue';
 
-const DEFAULT_TAB_PAUSE_MS = 30_000;
+export const DEFAULT_TAB_PAUSE_MS = 30_000;
 
 const log = new Logger('TabVisibility');
 
@@ -81,7 +81,8 @@ function _init(): void {
         }
       }
       for (const entry of _pausedListeners) {
-        _schedulePausedEntry(entry);
+        if (entry.delayMs <= 0) _firePausedEntry(entry);
+        else _schedulePausedEntry(entry);
       }
     } else if (visible && !_isVisible.value) {
       _cancelPausedEntries();
@@ -96,6 +97,16 @@ function _init(): void {
           log.error('onTabVisible listener threw:', err);
         }
       }
+    }
+  });
+
+  // a frozen page runs no timers, so the pending pauses happen now or never
+  document.addEventListener('freeze', () => {
+    for (const entry of _pausedListeners) {
+      if (entry.timer === null) continue;
+      clearTimeout(entry.timer);
+      entry.timer = null;
+      _firePausedEntry(entry);
     }
   });
 }

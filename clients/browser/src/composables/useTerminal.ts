@@ -43,6 +43,10 @@ export function useTerminal(): UseTerminalReturn {
   let streamAbortController: AbortController | undefined;
   let currentOptions: UseTerminalOptions | undefined;
   let streamGen = 0;
+  let stream: AsyncGenerator<Uint8Array> | undefined;
+  let streamClient: RPCClient | undefined;
+  let wentOffline = false;
+  let keptAcrossBlip = false;
 
   const proxy = (r: RPCClient) => r.createProxy<TerminalManagerInterface>(namespaces.terminalManagerRpc);
 
@@ -54,14 +58,18 @@ export function useTerminal(): UseTerminalReturn {
     currentOptions = options;
 
     try {
-      const session = await rpcCall(rpc, (r) =>
-        proxy(r).createSession({
-          cols: options?.cols ?? 80,
-          rows: options?.rows ?? 24,
-          cwd: options?.cwd,
-          shell: options?.shell,
-          env: options?.env,
-        }),
+      // a lost reply may still have started a shell, a retry would start a second one
+      const session = await rpcCall(
+        rpc,
+        (r) =>
+          proxy(r).createSession({
+            cols: options?.cols ?? 80,
+            rows: options?.rows ?? 24,
+            cwd: options?.cwd,
+            shell: options?.shell,
+            env: options?.env,
+          }),
+        { maxRetries: 0 },
       );
 
       sessionId.value = session.sessionId;
@@ -69,6 +77,8 @@ export function useTerminal(): UseTerminalReturn {
       isConnected.value = true;
 
       streamAbortController = new AbortController();
+      wentOffline = false;
+      keptAcrossBlip = false;
       const gen = ++streamGen;
       consumeOutputStream(session.sessionId, options, gen);
     } catch (err) {
@@ -81,18 +91,23 @@ export function useTerminal(): UseTerminalReturn {
 
   async function consumeOutputStream(sid: string, options: UseTerminalOptions | undefined, gen: number): Promise<void> {
     try {
-      // Async iterator — pin to the rpc-snapshot active at stream-start.
-      // A subsequent endpoint-swap bumps streamGen and the loop bails on the
-      // next iteration; rpcCall doesn't apply here since this isn't one-shot.
+      // the stream stays on the client it started on, rpcCall does not apply to it
       const current = rpc.value;
       if (!current) return;
 
-      for await (const chunk of proxy(current).generateOutput(sid)) {
+      const output = proxy(current).generateOutput(sid);
+      stream = output;
+      streamClient = current;
+      for await (const chunk of output) {
         if (gen !== streamGen || streamAbortController?.signal.aborted) break;
         options?.onData?.(chunk);
       }
     } catch (err) {
       if (gen === streamGen && !streamAbortController?.signal.aborted) {
+        if (keptAcrossBlip) {
+          restart();
+          return;
+        }
         error.value = err instanceof Error ? err : new Error(String(err));
         options?.onError?.(error.value);
       }
@@ -103,6 +118,7 @@ export function useTerminal(): UseTerminalReturn {
       // recovery path already set it to true on the new client.
       if (gen === streamGen && !streamAbortController?.signal.aborted) {
         isConnected.value = false;
+        closeRemote(sid);
         options?.onClose?.();
       }
     }
@@ -130,15 +146,10 @@ export function useTerminal(): UseTerminalReturn {
   }
 
   async function close(): Promise<void> {
-    streamAbortController?.abort();
-    streamGen++;
+    stopStream();
 
     if (sessionId.value) {
-      try {
-        await rpcCall(rpc, (r) => proxy(r).closeSession(sessionId.value!), { awaitConnect: false, maxRetries: 0 });
-      } catch {
-        // Ignore — server may already have torn down the session
-      }
+      await closeRemote(sessionId.value);
     }
 
     sessionId.value = undefined;
@@ -146,11 +157,24 @@ export function useTerminal(): UseTerminalReturn {
     currentOptions = undefined;
   }
 
-  function handleReconnected(): void {
-    if (!sessionId.value && !isConnected.value) return;
-    const savedOptions = currentOptions;
+  function stopStream(): void {
     streamAbortController?.abort();
     streamGen++;
+    stream?.return(undefined).catch(() => undefined);
+    stream = undefined;
+    streamClient = undefined;
+    keptAcrossBlip = false;
+  }
+
+  function closeRemote(sid: string): Promise<void> {
+    return rpcCall(rpc, (r) => proxy(r).closeSession(sid), { awaitConnect: false, maxRetries: 0 }).catch(() => undefined);
+  }
+
+  function restart(): void {
+    const savedOptions = currentOptions;
+    const sid = sessionId.value;
+    stopStream();
+    if (sid) closeRemote(sid);
     sessionId.value = undefined;
     isConnected.value = false;
     currentOptions = undefined;
@@ -160,10 +184,26 @@ export function useTerminal(): UseTerminalReturn {
     }
   }
 
+  function handleReconnected(): void {
+    if (!sessionId.value && !isConnected.value) return;
+    // under the down debounce the client stays and the nats lib re-subscribes the stream itself
+    if (isConnected.value && !wentOffline && rpc.value === streamClient) {
+      keptAcrossBlip = true;
+      return;
+    }
+    restart();
+  }
+
+  function handleDisconnected(): void {
+    wentOffline = true;
+  }
+
   cameraUi.on('reconnected', handleReconnected);
+  cameraUi.on('disconnected', handleDisconnected);
 
   tryOnScopeDispose(() => {
     cameraUi.off('reconnected', handleReconnected);
+    cameraUi.off('disconnected', handleDisconnected);
     close();
   });
 

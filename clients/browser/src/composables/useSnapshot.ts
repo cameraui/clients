@@ -1,12 +1,19 @@
 import { tryOnScopeDispose } from '@vueuse/core';
 import { computed, ref, shallowRef, toValue, watch } from 'vue';
 
-import { acquireCameraDevice, releaseCameraDevice } from './useCameraById.js';
+import { createRetryTimer } from '../utils/createRetryTimer.js';
+import { acquireCameraDevice, releaseCameraDevice, rememberCameraName } from './useCameraById.js';
 import { useCameraUi } from './useCameraUi.js';
 import { useDeviceManager } from './useDeviceManager.js';
 
 import type { ComputedRef, MaybeRefOrGetter, ShallowRef } from 'vue';
 import type { DBCamera } from '../server/index.js';
+import type { ReactiveCameraDevice } from '../types.js';
+
+export interface SnapshotStamp {
+  sourceId: string;
+  fetchedAt: number;
+}
 
 export interface UseSnapshotReturn {
   snapshot: ShallowRef<ArrayBuffer | undefined>;
@@ -17,9 +24,12 @@ export interface UseSnapshotReturn {
 }
 
 const REVOKE_DELAY_MS = 5000;
+const SERVER_CLOCK_STEP_MS = 60_000;
 
 const snapshotCache = new Map<string, ArrayBuffer>();
 const timestampCache = new Map<string, number>();
+const takenAtCache = new Map<string, number>();
+const stampCache = new Map<string, SnapshotStamp>();
 const urlCache = new Map<string, string>();
 const subscribers = new Map<string, Set<() => void>>();
 const pendingLoads = new Map<string, Promise<ArrayBuffer | undefined>>();
@@ -40,7 +50,7 @@ function fetchSnapshotShared(deviceManager: ReturnType<typeof useDeviceManager>,
       const result = await device.fetchSnapshot(undefined, forceFresh ? true : undefined);
       return result ?? undefined;
     } finally {
-      if (device) releaseCameraDevice(id);
+      if (device) releaseCameraDevice(device);
     }
   })().finally(() => pendingLoads.delete(id));
 
@@ -48,11 +58,11 @@ function fetchSnapshotShared(deviceManager: ReturnType<typeof useDeviceManager>,
   return promise;
 }
 
-let reconnectHooked = false;
+const hookedContexts = new WeakSet<object>();
 
 function hookReconnectRefresh(cameraUi: ReturnType<typeof useCameraUi>, deviceManager: ReturnType<typeof useDeviceManager>): void {
-  if (reconnectHooked) return;
-  reconnectHooked = true;
+  if (hookedContexts.has(cameraUi)) return;
+  hookedContexts.add(cameraUi);
   cameraUi.on('reconnected', () => {
     // the isConnected watchers re-subscribe in the next flush, a synchronous sweep finds every set empty
     setTimeout(() => {
@@ -74,7 +84,23 @@ function deferRevoke(url: string): void {
   setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
 }
 
-export function setSnapshot(cameraId: string, data: ArrayBuffer, fetchedAt?: number): void {
+function isOlderThanHeld(cameraId: string, takenAt: number | undefined, stamp: SnapshotStamp | undefined): boolean {
+  const held = stampCache.get(cameraId);
+  if (stamp && held) {
+    const behind = held.fetchedAt - stamp.fetchedAt;
+    // further behind follows a step back of the server clock, nothing newer would ever replace the held image
+    return behind > 0 && behind <= SERVER_CLOCK_STEP_MS;
+  }
+  // without stamps on both sides a push is the newest image
+  return takenAt !== undefined && takenAt < (takenAtCache.get(cameraId) ?? -Infinity);
+}
+
+export function setSnapshot(cameraId: string, data: ArrayBuffer, fetchedAt?: number, takenAt?: number, stamp?: SnapshotStamp): void {
+  if (isOlderThanHeld(cameraId, takenAt, stamp)) return;
+  takenAtCache.set(cameraId, takenAt ?? Date.now());
+  if (stamp) stampCache.set(cameraId, stamp);
+  else stampCache.delete(cameraId);
+
   // Buffer is being replaced — schedule revocation of the old blob URL so the
   // next read produces a fresh URL bound to the new bytes, but keep the old
   // URL valid long enough for any pending img fetches to complete. The same
@@ -104,6 +130,11 @@ export function getSnapshotTimestamp(cameraId: string): number | undefined {
   return timestampCache.get(cameraId);
 }
 
+export function getSnapshotStamp(cameraId: string, sourceId: string): number | undefined {
+  const stamp = stampCache.get(cameraId);
+  return stamp?.sourceId === sourceId ? stamp.fetchedAt : undefined;
+}
+
 export function subscribeSnapshot(cameraId: string, cb: () => void): () => void {
   if (!subscribers.has(cameraId)) {
     subscribers.set(cameraId, new Set());
@@ -130,6 +161,8 @@ export function clearSnapshotCache(): void {
   urlCache.clear();
   snapshotCache.clear();
   timestampCache.clear();
+  takenAtCache.clear();
+  stampCache.clear();
 }
 
 export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>): UseSnapshotReturn {
@@ -174,7 +207,15 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
 
   let unsubscribe: (() => void) | undefined;
   let heldDeviceId: string | undefined;
+  let heldDevice: ReactiveCameraDevice | undefined;
   let pendingHoldId: string | undefined;
+  const holdRetry = createRetryTimer();
+  let disposed = false;
+
+  function currentId(): string {
+    const idOrName = toValue(cameraIdOrName);
+    return typeof idOrName === 'string' ? idOrName : idOrName._id;
+  }
 
   // Hold the device for the composable's lifetime — closing it (refcount 0)
   // kills its `snapshot:updated` subscription, so server auto-refresh pushes
@@ -186,26 +227,43 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
       const device = await acquireCameraDevice(deviceManager, id);
       if (!device) return;
 
-      const idOrName = toValue(cameraIdOrName);
-      const currentId = typeof idOrName === 'string' ? idOrName : idOrName._id;
-      if (currentId !== id || heldDeviceId === id) {
-        releaseCameraDevice(id);
+      if (disposed || currentId() !== id || heldDeviceId === id) {
+        releaseCameraDevice(device);
         return;
       }
 
       releaseHeldDevice();
       heldDeviceId = id;
+      heldDevice = device;
+      cancelHoldRetry();
     } catch {
-      // Camera may be offline / RPC timeout — silently ignore
+      if (currentId() === id) scheduleHoldRetry(id);
     } finally {
       pendingHoldId = undefined;
     }
   }
 
+  function scheduleHoldRetry(id: string): void {
+    if (disposed) return;
+    holdRetry.schedule(() => {
+      if (!isConnected.value || currentId() !== id || isCameraDisabled(toValue(cameraIdOrName))) return;
+      void holdDevice(id).then(() => {
+        // the load after the failed hold found no device either
+        if (heldDeviceId === id) return loadSnapshot(id);
+      });
+    });
+  }
+
+  function cancelHoldRetry(): void {
+    holdRetry.cancel();
+    holdRetry.reset();
+  }
+
   function releaseHeldDevice(): void {
     if (heldDeviceId) {
-      releaseCameraDevice(heldDeviceId);
+      if (heldDevice) releaseCameraDevice(heldDevice);
       heldDeviceId = undefined;
+      heldDevice = undefined;
     }
   }
 
@@ -224,7 +282,8 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     _isLoading.value = true;
     try {
       const result = await fetchSnapshotShared(deviceManager, id);
-      if (result) snapshot.value = result;
+      // the cache keeps a newer push over a late reply
+      if (result) snapshot.value = snapshotCache.get(id) ?? result;
     } catch {
       // Camera may be offline / RPC timeout — silently ignore
     } finally {
@@ -249,7 +308,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     _isLoading.value = true;
     try {
       const result = await fetchSnapshotShared(deviceManager, id, true);
-      if (result) snapshot.value = result;
+      if (result) snapshot.value = snapshotCache.get(id) ?? result;
     } catch {
       // Camera may be offline / RPC timeout — silently ignore
     } finally {
@@ -261,12 +320,15 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
   watch(
     [isConnected, () => toValue(cameraIdOrName), () => isCameraDisabled(toValue(cameraIdOrName))],
     async ([connected, cameraIdName, disabled]) => {
+      cancelHoldRetry();
       unsubscribe?.();
       unsubscribe = undefined;
 
       const id = typeof cameraIdName === 'string' ? cameraIdName : cameraIdName._id;
 
       if (connected && id && !disabled) {
+        // a card that loads its device by name then shares this one
+        if (typeof cameraIdName === 'object') rememberCameraName(cameraIdName.name, id);
         unsubscribe = subscribe(id);
         // holding the device is a round trip, a remounted card shows its cached snapshot right away
         showCached(id);
@@ -287,6 +349,8 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
   );
 
   tryOnScopeDispose(() => {
+    disposed = true;
+    cancelHoldRetry();
     unsubscribe?.();
     releaseHeldDevice();
   });
