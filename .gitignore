@@ -14,6 +14,7 @@ coverage
 *.local
 .mypy_cache
 __pycache__
+__bench__
 STYLE_GUIDE.md
 
 .idea
