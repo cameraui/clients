@@ -63,6 +63,7 @@ export type ConnectionPhase =
       readonly lastError: string;
       readonly nextRetryAt: number;
       readonly backoffHint?: BackoffHint;
+      readonly pendingTokens?: Tokens;
     };
 
 export interface BackoffHint {

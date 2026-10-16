@@ -154,6 +154,55 @@ describe('attachCrossTab — filtering + error handling', () => {
   });
 });
 
+describe('attachCrossTab: tokens of another instance', () => {
+  const OTHER: Endpoint = { url: 'https://other-instance.example', mode: 'direct-wan' };
+
+  function sameInstance(payload: { endpoint?: Endpoint }): boolean {
+    return payload.endpoint?.url === LAN.url || payload.endpoint?.url === WAN.url;
+  }
+
+  it('keeps its own tokens when another tab stored a different instance', () => {
+    const source = new EventTarget();
+    const kernel = createKernel({ context: makeCtx(), initial: ONLINE_PHASE });
+    const onTokensReceived = vi.fn();
+    const onTokensIgnored = vi.fn();
+    const accept = vi.fn(sameInstance);
+    attachCrossTab({ kernel, source, accept, onTokensReceived, onTokensIgnored });
+
+    fireStorage(source, 'camera.ui:transport:target', jsonTarget({ endpoint: OTHER, tokens: TOKENS_NEW }));
+
+    if (kernel.phase.kind !== 'online') throw new Error('expected online');
+    expect(kernel.phase.target.tokens).toEqual(TOKENS_OLD);
+    expect(accept).toHaveBeenCalledWith({ endpoint: OTHER, tokens: TOKENS_NEW }, ONLINE_PHASE.target);
+    expect(onTokensReceived).not.toHaveBeenCalled();
+    expect(onTokensIgnored).toHaveBeenCalledWith({ endpoint: OTHER, tokens: TOKENS_NEW });
+  });
+
+  it('does not absorb tokens of another instance while not online', () => {
+    const source = new EventTarget();
+    const kernel = createKernel({ context: makeCtx(), initial: IDLE_PHASE });
+    const onTokensReceived = vi.fn();
+    const absorb = vi.fn();
+    attachCrossTab({ kernel, source, accept: sameInstance, onTokensReceived, absorb });
+
+    fireStorage(source, 'camera.ui:transport:target', jsonTarget({ endpoint: OTHER, tokens: TOKENS_NEW }));
+
+    expect(absorb).not.toHaveBeenCalled();
+    expect(onTokensReceived).not.toHaveBeenCalled();
+  });
+
+  it('still takes tokens of its own instance stored under another address', () => {
+    const source = new EventTarget();
+    const kernel = createKernel({ context: makeCtx(), initial: ONLINE_PHASE });
+    attachCrossTab({ kernel, source, accept: sameInstance });
+
+    fireStorage(source, 'camera.ui:transport:target', jsonTarget({ endpoint: WAN, tokens: TOKENS_NEW }));
+
+    if (kernel.phase.kind !== 'online') throw new Error('expected online');
+    expect(kernel.phase.target.tokens).toEqual(TOKENS_NEW);
+  });
+});
+
 describe('attachCrossTab — detach', () => {
   it('stops reacting after detach', () => {
     const source = new EventTarget();

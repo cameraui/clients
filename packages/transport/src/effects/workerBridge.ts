@@ -28,6 +28,7 @@ export interface WorkerBridge {
   syncHost(host: WorkerHost): void;
   syncAll(): void;
   revalidateWorkers(): void;
+  forgetHost(host: WorkerHost): void;
 }
 
 export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
@@ -44,7 +45,9 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
     if (detached) return;
     const msg = makeSync(phase);
     let count = 0;
+    const present = new Set<WorkerHost>();
     for (const host of options.hosts()) {
+      present.add(host);
       try {
         host.postMessage(msg);
         count++;
@@ -53,6 +56,7 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
         log.warn('broadcast postMessage failed', { gen: msg.generation, phase: phase.kind, err });
       }
     }
+    forgetDeparted(present);
     options.onBroadcast?.(generation, count);
   }
 
@@ -111,6 +115,17 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
     });
   }
 
+  function forgetHost(host: WorkerHost): void {
+    hostListenerCleanups.get(host)?.();
+    hostListenerCleanups.delete(host);
+  }
+
+  function forgetDeparted(present: ReadonlySet<WorkerHost>): void {
+    for (const host of hostListenerCleanups.keys()) {
+      if (!present.has(host)) forgetHost(host);
+    }
+  }
+
   const unsubKernel = options.kernel.subscribe((next) => {
     broadcast(next);
   });
@@ -130,7 +145,9 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
     },
     revalidateWorkers() {
       if (detached) return;
+      const present = new Set<WorkerHost>();
       for (const host of options.hosts()) {
+        present.add(host);
         try {
           host.postMessage({ type: 'kernel-revalidate' });
           maybeAttachHostListener(host);
@@ -138,6 +155,8 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
           log.warn('revalidate postMessage failed', err);
         }
       }
+      forgetDeparted(present);
     },
+    forgetHost,
   };
 }

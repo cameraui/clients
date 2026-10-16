@@ -312,6 +312,75 @@ describe('attachTransportSync — per-transport rollback and retry', () => {
     }
   });
 
+  it('an apply the server refused waits for new tokens instead of retrying', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = targetWith(LAN, 'at-0');
+      const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
+      const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
+      socketio.failNextApplies = 1;
+      socketio.failWith = Object.assign(new Error('forbidden: token not allowed on rpc bus'), { wsCloseCode: 4403 });
+      const onError = vi.fn();
+      const onRetry = vi.fn();
+
+      attachTransportSync({ kernel, transports: [socketio], retryMs: 1_000, onError, onRetry });
+      await flush();
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(onError).toHaveBeenCalledTimes(1);
+      expect(onRetry).not.toHaveBeenCalled();
+      expect(socketio.applyCalls).toEqual([target]);
+      expect(vi.getTimerCount()).toBe(0);
+
+      kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: { ...target.tokens, access: 'at-1' } });
+      await flush();
+      expect(socketio.applyCalls).toHaveLength(2);
+      expect(socketio.target).toMatchObject({ tokens: { access: 'at-1' } });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a retry the server refuses is the last one', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = targetWith(LAN, 'at-0');
+      const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
+      const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
+      socketio.failNextApplies = 2;
+
+      attachTransportSync({ kernel, transports: [socketio], retryMs: 1_000 });
+      await flush();
+      socketio.failWith = Object.assign(new Error('close code 4400'), { wsCloseCode: 4400 });
+      await vi.advanceTimersByTimeAsync(10_000);
+
+      expect(socketio.applyCalls).toEqual([target, target]);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('an error that only mentions forbidden keeps retrying', async () => {
+    vi.useFakeTimers();
+    try {
+      const target = targetWith(LAN, 'at-0');
+      const kernel = createKernel({ context: makeCtx(), initial: onlinePhase(target) });
+      const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
+      socketio.failNextApplies = 1;
+      socketio.failWith = new Error('resolve failed: 403 from the signing proxy');
+
+      attachTransportSync({ kernel, transports: [socketio], retryMs: 1_000 });
+      await flush();
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      expect(socketio.applyCalls).toEqual([target, target]);
+      expect(socketio.target).toBe(target);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('detach cancels pending retries', async () => {
     vi.useFakeTimers();
     try {

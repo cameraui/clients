@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createWsTransport } from '../ws.js';
 
@@ -114,12 +114,12 @@ describe('createWsTransport — apply lifecycle', () => {
     expect(instances()).toHaveLength(1);
   });
 
-  it('proxy session is appended as `session` query param', async () => {
+  it('keeps the cloud proxy session out of the stream URL', async () => {
     const { t, instances } = setup();
     await t.apply(T2);
     t.open({ path: '/api/stream' });
     const url = new URL(instances()[0]!.url);
-    expect(url.searchParams.get('session')).toBe('ps-1');
+    expect(url.searchParams.has('session')).toBe(false);
     expect(url.searchParams.get('token')).toBe('at-1');
   });
 
@@ -158,6 +158,20 @@ describe('createWsTransport — apply lifecycle', () => {
     await t.apply(T1_TOKEN2);
     expect(instances()).toHaveLength(1);
     expect(first.readyState).toBe(MockWebSocket.OPEN);
+  });
+
+  it('a 4401 close names the token the socket dialed with', async () => {
+    const { t, instances } = setup();
+    const authError = vi.fn();
+    t.on('auth-error', authError);
+    await t.apply(T1);
+    t.open({ path: '/s' });
+    instances()[0]!.simulateOpen();
+    await t.apply(T1_TOKEN2);
+
+    instances()[0]!.simulateServerClose(4401, 'unauthorized');
+
+    expect(authError).toHaveBeenCalledWith(expect.objectContaining({ access: 'at-1' }));
   });
 
   it('token-only change: subsequent open() uses the fresh token', async () => {
@@ -328,5 +342,129 @@ describe('createWsTransport — resolveUrl', () => {
     await flush();
     expect(MockWebSocket.instances).toHaveLength(0);
     expect(close).toHaveBeenCalledWith({ code: 4003, reason: 'resolve-failed', wasClean: false });
+  });
+
+  describe('with a resolver that hangs', () => {
+    function pendingResolver() {
+      const calls: { target: ConnectionTarget; release: (url: string) => void }[] = [];
+      const resolveUrl = ({ target }: { target: ConnectionTarget }) =>
+        new Promise<string>((release) => {
+          calls.push({ target, release });
+        });
+      return { resolveUrl, calls };
+    }
+
+    function make(resolveUrl: (ctx: { target: ConnectionTarget }) => Promise<string>) {
+      MockWebSocket.instances = [];
+      return createWsTransport({ webSocketCtor: MockWebSocket as unknown as typeof WebSocket, resolveUrl });
+    }
+
+    afterEach(() => {
+      vi.useRealTimers();
+    });
+
+    it('closes the handle with resolve-timeout when the resolver never answers', async () => {
+      vi.useFakeTimers();
+      const t = make(() => new Promise<string>(() => {}));
+      const h = t.open({ path: '/api/stream' });
+      const close = vi.fn();
+      h.on('close', close);
+      await t.apply(T1);
+      await vi.advanceTimersByTimeAsync(9_999);
+      expect(close).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(close).toHaveBeenCalledWith({ code: 4003, reason: 'resolve-timeout', wasClean: false });
+      expect(MockWebSocket.instances).toHaveLength(0);
+      await t.dispose();
+    });
+
+    it('drops a URL that arrives after the timeout', async () => {
+      vi.useFakeTimers();
+      const { resolveUrl, calls } = pendingResolver();
+      const t = make(resolveUrl);
+      const h = t.open({ path: '/api/stream' });
+      const close = vi.fn();
+      h.on('close', close);
+      await t.apply(T1);
+      await vi.advanceTimersByTimeAsync(10_000);
+      calls[0]!.release('wss://late');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(close).toHaveBeenCalledTimes(1);
+      await t.dispose();
+    });
+
+    it('leaves no timer once the URL resolved', async () => {
+      vi.useFakeTimers();
+      const { resolveUrl, calls } = pendingResolver();
+      const t = make(resolveUrl);
+      t.open({ path: '/api/stream' });
+      await t.apply(T1);
+      calls[0]!.release('wss://signed');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(MockWebSocket.instances).toHaveLength(1);
+      expect(vi.getTimerCount()).toBe(0);
+      await t.dispose();
+    });
+
+    it('closes only once and leaves no timer when the resolver rejects', async () => {
+      vi.useFakeTimers();
+      const t = make(async () => {
+        throw new Error('no sign');
+      });
+      const h = t.open({ path: '/api/stream' });
+      const close = vi.fn();
+      h.on('close', close);
+      await t.apply(T1);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(close).toHaveBeenCalledWith({ code: 4003, reason: 'resolve-failed', wasClean: false });
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(close).toHaveBeenCalledTimes(1);
+      await t.dispose();
+    });
+
+    it('leaves no timer when the handle is disposed while resolving', async () => {
+      vi.useFakeTimers();
+      const t = make(pendingResolver().resolveUrl);
+      const h = t.open({ path: '/api/stream' });
+      await t.apply(T1);
+      expect(vi.getTimerCount()).toBe(1);
+      h.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+      await t.dispose();
+    });
+
+    it('leaves no timer when the transport is disposed while resolving', async () => {
+      vi.useFakeTimers();
+      const t = make(pendingResolver().resolveUrl);
+      t.open({ path: '/api/stream' });
+      await t.apply(T1);
+      await t.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('resolves again for the new token when the token changes while resolving', async () => {
+      vi.useFakeTimers();
+      const { resolveUrl, calls } = pendingResolver();
+      const t = make(resolveUrl);
+      const h = t.open({ path: '/api/stream' });
+      const close = vi.fn();
+      h.on('close', close);
+      await t.apply(T1);
+      await t.apply(T1_TOKEN2);
+      calls[0]!.release('wss://signed-for-at-1');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(MockWebSocket.instances).toHaveLength(0);
+      expect(calls).toHaveLength(2);
+      expect(calls[1]!.target).toBe(T1_TOKEN2);
+      calls[1]!.release('wss://signed-for-at-2');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(MockWebSocket.instances.map((ws) => ws.url)).toEqual(['wss://signed-for-at-2']);
+      expect(close).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+      await t.dispose();
+    });
   });
 });

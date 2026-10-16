@@ -1,5 +1,5 @@
 import type { Kernel } from '../core/kernel.js';
-import type { ConnectionPhase } from '../core/types.js';
+import type { Action, ConnectionPhase } from '../core/types.js';
 
 export type Detach = () => void;
 
@@ -30,8 +30,10 @@ export function attachBackoff(options: BackoffOptions): Detach {
   const clearTimer = options.clearTimer ?? ((h) => clearTimeout(h as ReturnType<typeof setTimeout>));
 
   let timer: unknown;
+  let firesAt = 0;
   let attempt = 0;
   let detached = false;
+  const ownRetry: Action = { type: 'USER_RETRY' };
 
   function cancelTimer(reason?: 'phase-left-offline' | 'detach' | 'rescheduled'): void {
     if (timer !== undefined) {
@@ -41,47 +43,55 @@ export function attachBackoff(options: BackoffOptions): Detach {
     }
   }
 
+  function fastDelay(): number | undefined {
+    const quick = options.firstAttemptDelayMs?.();
+    return typeof quick === 'number' && quick >= 0 ? quick : undefined;
+  }
+
   function scheduleFromPhase(phase: OfflinePhase, isReschedule: boolean): void {
     // Two sources for the delay: our own local `schedule[attempt]` (the
-    // exponential bucket), and `phase.nextRetryAt` (potentially extended
-    // by a server-issued BACKOFF_HINT). We take the LATER of the two —
+    // exponential bucket), and a server-issued BACKOFF_HINT carried in
+    // `phase.nextRetryAt`. We take the LATER of the two:
     // never shorten below the server hint. Premature retries are the riskier
     // mode: they hammer the backend right when it's already strained. The
     // firstAttemptDelayMs hook may shorten only the LOCAL schedule, and only
     // for the first attempt (transient-failure fast path).
     cancelTimer(isReschedule ? 'rescheduled' : undefined);
     const baseDelay = schedule[Math.min(attempt, schedule.length - 1)]!;
-    const quick = attempt === 0 ? options.firstAttemptDelayMs?.() : undefined;
-    const scheduleDelay = typeof quick === 'number' && quick >= 0 ? Math.min(quick, baseDelay) : baseDelay;
-    const phaseDelay = Math.max(0, phase.nextRetryAt - now());
+    const quick = attempt === 0 ? fastDelay() : undefined;
+    const scheduleDelay = quick === undefined ? baseDelay : Math.min(quick, baseDelay);
+    // without a hint nextRetryAt is only the reducer's flat default, honoring it would swallow the fast path
+    const phaseDelay = phase.backoffHint ? Math.max(0, phase.nextRetryAt - now()) : 0;
     const delay = Math.max(scheduleDelay, phaseDelay);
     options.onScheduled?.(attempt + 1, delay);
     if (phase.backoffHint && phaseDelay > scheduleDelay) {
       options.onHintApplied?.(delay, phase.backoffHint.source);
     }
+    firesAt = now() + delay;
     timer = setTimer(() => {
       timer = undefined;
       if (detached) return;
       if (options.kernel.phase.kind !== 'offline') return;
       attempt += 1;
       options.onFire?.(attempt);
-      options.kernel.dispatch({ type: 'USER_RETRY' });
+      options.kernel.dispatch(ownRetry);
     }, delay);
   }
 
-  const unsubKernel = options.kernel.subscribe((next, prev) => {
+  const unsubKernel = options.kernel.subscribe((next, prev, action) => {
     if (next.kind === 'offline' && prev.kind !== 'offline') {
       scheduleFromPhase(next, false);
       return;
     }
-    if (next.kind === 'offline' && prev.kind === 'offline' && next.nextRetryAt !== prev.nextRetryAt) {
-      // BACKOFF_HINT (or any other action that mutates nextRetryAt within
-      // offline) — reschedule against the new deadline.
-      scheduleFromPhase(next, true);
+    if (next.kind === 'offline' && prev.kind === 'offline' && next.backoffHint !== prev.backoffHint) {
+      // a hint only ever pushes the pending retry out
+      if (next.backoffHint && next.nextRetryAt > firesAt) scheduleFromPhase(next, true);
       return;
     }
     if (prev.kind === 'offline' && next.kind !== 'offline') {
       cancelTimer('phase-left-offline');
+      // a retry from outside while the fast path is open is a wake, the schedule starts over
+      if (action.type === 'USER_RETRY' && action !== ownRetry && fastDelay() !== undefined) attempt = 0;
     }
     if (next.kind === 'online' || next.kind === 'idle') {
       attempt = 0;

@@ -17,6 +17,7 @@ export interface BackgroundProbeOptions {
   readonly preferGraceMs?: number;
   readonly isCurrentHealthy?: () => boolean;
   readonly onResult?: (outcome: BackgroundProbeOutcome, detail?: string) => void;
+  readonly ready?: () => Promise<unknown>;
 }
 
 export interface BackgroundProbe {
@@ -41,12 +42,16 @@ export function createBackgroundProbe(options: BackgroundProbeOptions): Backgrou
         options.onResult?.('failed', 'empty pool');
         return 'failed';
       }
+      if (options.ready) {
+        await options.ready().catch(() => undefined);
+        if (disposed || options.kernel.phase.kind !== 'online') return 'skipped';
+      }
       const lastTokens = options.lastTarget?.()?.tokens;
       const candidates: RaceCandidate<Tokens>[] = pool.map((endpoint) => ({
         endpoint,
         run: (signal) => options.probe({ endpoint, lastTokens, signal }),
       }));
-      const { endpoint, value: tokens } = await raceFirst(candidates, {
+      const { endpoint, value } = await raceFirst(candidates, {
         timeoutByMode: options.timeoutByMode,
         parentSignal: ctrl.signal,
         prefer: options.prefer,
@@ -60,12 +65,17 @@ export function createBackgroundProbe(options: BackgroundProbeOptions): Backgrou
       }
       const current = phase.target.endpoint;
       const same = current.url === endpoint.url && current.mode === endpoint.mode;
-      // right after a network switch the race can misfire while the new
-      // interface is still settling, never downgrade a healthy preferred path
-      if (!same && options.prefer && options.prefer(current) && !options.prefer(endpoint) && options.isCurrentHealthy?.() === true) {
-        options.onResult?.('kept', current.url);
+      // a swap rebuilds every channel and stream, so a healthy target only moves to a preferred path.
+      // right after a network switch the race can also misfire while the new interface is still settling
+      const preferredWinner = options.prefer?.(endpoint) ?? false;
+      const preferredCurrent = options.prefer?.(current) ?? false;
+      if (!same && options.isCurrentHealthy?.() === true && !(preferredWinner && !preferredCurrent)) {
+        if (value !== lastTokens) options.kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: value });
+        options.onResult?.('kept', preferredWinner === preferredCurrent ? `${current.url} (same class as ${endpoint.url})` : current.url);
         return 'kept';
       }
+      // a probe that only confirmed the round's tokens must not undo a refresh that landed meanwhile
+      const tokens = value === lastTokens ? phase.target.tokens : value;
       options.kernel.dispatch({ type: 'ENDPOINT_SWAP', endpoint, tokens });
       const outcome = same ? 'same' : 'swap';
       options.onResult?.(outcome, endpoint.url);

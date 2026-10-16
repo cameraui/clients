@@ -1,4 +1,4 @@
-import { io, Manager } from 'socket.io-client';
+import { Manager } from 'socket.io-client';
 
 import { classifyClose } from './closeCodes.js';
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
@@ -9,6 +9,8 @@ import type { ConnectionTarget, TransportSpec, TransportStatus } from '../core/t
 import type { Transport, TransportEvent, TransportEventHandler, Unsubscribe } from './contract.js';
 
 const RESOLVE_RETRY_MIN_MS = 3_000;
+const PROBE_TIMEOUT_MS = 3_000;
+const RELEASE_GRACE_MS = 10_000;
 
 export type { Socket };
 
@@ -37,6 +39,7 @@ export interface SocketioTransportOptions {
   readonly reconnectionDelayMax?: number;
   readonly timeout?: number;
   readonly staleAfterMs?: number;
+  readonly releaseGraceMs?: number;
   readonly logger?: Logger;
 }
 
@@ -44,6 +47,8 @@ export interface SocketioTransport extends Transport {
   readonly manager: Manager | null;
   socket(namespace?: string): Socket | null;
   ensureSocket(namespace: string): Socket | null;
+  acquire(namespace: string): Unsubscribe;
+  onRebuild(handler: () => void): Unsubscribe;
   reviveDeadSockets(): void;
   ensureAlive(): Promise<TransportStatus>;
 }
@@ -59,18 +64,24 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   const logger = options.logger;
   const resolveQuery = options.resolveQuery;
   const resolveRefreshMs = options.resolveRefreshMs ?? 0;
+  const releaseGraceMs = options.releaseGraceMs ?? RELEASE_GRACE_MS;
 
   const emitter = new TransportEmitter();
   const sockets = new Map<string, Socket>();
+  const reopen = new Set<string>();
+  const rebuildListeners = new Set<() => void>();
+  const holds = new Map<string, number>();
+  const unheld = new Set<string>();
+  const releaseTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let manager: Manager | null = null;
   let currentTarget: ConnectionTarget | null = null;
-  let currentQuery: Record<string, string> = {};
   let refreshTimer: ReturnType<typeof setInterval> | null = null;
   let queryRefreshAt = 0;
   let queryRefreshing = false;
   let status: TransportStatus = { up: false };
   let disposed = false;
   let applyEpoch = 0;
+  let ensureInflight: Promise<TransportStatus> | null = null;
 
   const staleAfterMs = options.staleAfterMs ?? 60_000;
   let lastActivityAt = 0;
@@ -83,20 +94,18 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     return lastActivityAt > 0 && Date.now() - lastActivityAt > staleAfterMs;
   }
 
-  function buildAuth(target: ConnectionTarget): Record<string, unknown> {
-    const auth: Record<string, unknown> = { token: `Bearer ${target.tokens.access}` };
-    if (target.tokens.proxySession) auth.session = target.tokens.proxySession;
-    return auth;
+  function isDeadNow(): boolean {
+    const deadline = (manager?.engine as unknown as { _pingTimeoutTime?: unknown } | undefined)?._pingTimeoutTime;
+    if (typeof deadline === 'number') return Date.now() > deadline;
+    return isStaleNow();
   }
 
-  function buildQuery(target: ConnectionTarget): Record<string, string> {
-    const q: Record<string, string> = {};
-    if (target.tokens.proxySession) q.session = target.tokens.proxySession;
-    return q;
+  function buildAuth(target: ConnectionTarget): Record<string, unknown> {
+    return { token: `Bearer ${target.tokens.access}` };
   }
 
   async function queryFor(target: ConnectionTarget): Promise<Record<string, string>> {
-    const base = buildQuery(target);
+    const base: Record<string, string> = {};
     if (!resolveQuery) return base;
     return resolveQuery({ target, path: socketPath(target), query: base });
   }
@@ -110,13 +119,21 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     try {
       const query = await queryFor(target);
       if (currentTarget !== target || disposed) return;
-      currentQuery = query;
-      for (const sock of sockets.values()) sock.io.opts.query = query;
+      if (manager) manager.opts.query = query;
     } catch (err) {
       logger?.warn(`query refresh failed: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
       queryRefreshing = false;
       queryRefreshAt = Date.now();
+    }
+  }
+
+  async function refreshQueryWithin(ms: number): Promise<void> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([refreshQuery(), new Promise<void>((resolve) => (timer = setTimeout(resolve, ms)))]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -147,13 +164,20 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     emitter.emit('down', { reason });
   }
 
-  function isAuthError(msg: string): boolean {
-    return classifyClose(msg) === 'auth-expired';
+  function isAuthError(err: Error): boolean {
+    return classifyClose({ message: err?.message, data: (err as { data?: unknown } | undefined)?.data }) === 'auth-expired';
+  }
+
+  function dialedAccess(socket: Socket): string | undefined {
+    const token = (socket.auth as { token?: unknown } | undefined)?.token;
+    return typeof token === 'string' && token.startsWith('Bearer ') ? token.slice('Bearer '.length) : undefined;
   }
 
   function bindMainSocketEvents(socket: Socket): void {
     socket.on('connect', () => markUp());
     socket.on('disconnect', (reason: string) => {
+      // teardown disconnects before dropping listeners, that must not mark the next endpoint down
+      if (sockets.get(mainNs) !== socket) return;
       markDown(reason);
       if (resolveQuery) refreshQuery();
     });
@@ -162,8 +186,8 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
       logger?.debug(`connect_error (main): ${msg}`);
       // a rejected upgrade is a bare websocket error here, a stale signed query is the usual cause
       if (resolveQuery) refreshQuery();
-      if (isAuthError(msg)) {
-        emitter.emit('auth-error', { message: msg });
+      if (isAuthError(err)) {
+        emitter.emit('auth-error', { message: msg, access: dialedAccess(socket) });
         return;
       }
       markDown(msg);
@@ -172,8 +196,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
   function bindSecondarySocketEvents(socket: Socket): void {
     socket.on('connect_error', (err: Error) => {
-      const msg = err?.message ?? 'connect_error';
-      if (isAuthError(msg)) emitter.emit('auth-error', { message: msg });
+      if (isAuthError(err)) emitter.emit('auth-error', { message: err?.message ?? 'connect_error', access: dialedAccess(socket) });
     });
   }
 
@@ -186,26 +209,19 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     return `${prefix}${path}`;
   }
 
-  function openSocket(namespace: string, target: ConnectionTarget): Socket {
-    const url = `${socketOrigin(target)}${namespace}`;
-    const sock = io(url, {
-      path: socketPath(target),
-      auth: buildAuth(target),
-      query: currentQuery,
-      reconnection,
-      reconnectionDelay,
-      reconnectionDelayMax,
-      timeout,
-      rejectUnauthorized: false,
-      transports: ['websocket'],
-    });
+  function openSocket(namespace: string, mgr: Manager, target: ConnectionTarget): Socket {
+    const auth = buildAuth(target);
+    const sock = mgr.socket(namespace, { auth });
+    // the manager hands a released namespace its old socket back, auth included
+    sock.auth = auth;
     sockets.set(namespace, sock);
+    if (namespace === mainNs) bindMainSocketEvents(sock);
+    else bindSecondarySocketEvents(sock);
+    sock.connect();
     return sock;
   }
 
-  async function rebuildManager(target: ConnectionTarget): Promise<void> {
-    // resolve before tearing down: while the signer runs nothing may open a socket with a stale query
-    stopRefresh();
+  async function rebuildManager(target: ConnectionTarget, epoch: number): Promise<void> {
     let query: Record<string, string>;
     try {
       query = await queryFor(target);
@@ -213,11 +229,10 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
       markDown(err instanceof Error ? err.message : String(err));
       throw err;
     }
-    if (currentTarget !== target || disposed) return;
-    closeAllSockets();
-    currentQuery = query;
-    manager = new Manager(socketOrigin(target), {
+    if (epoch !== applyEpoch || disposed) return;
+    const mgr = new Manager(socketOrigin(target), {
       path: socketPath(target),
+      query,
       autoConnect: false,
       reconnection,
       reconnectionDelay,
@@ -226,28 +241,37 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
       rejectUnauthorized: false,
       transports: ['websocket'],
     });
-    const main = openSocket(mainNs, target);
-    bindMainSocketEvents(main);
-    startRefresh();
-
-    // the sockets ride io()'s cached manager (main.io), not the local
-    // `manager` instance — activity must be observed there
+    manager = mgr;
     lastActivityAt = Date.now();
-    main.io.on('open', touchActivity);
-    main.io.on('ping', touchActivity);
-    main.io.on('packet', touchActivity);
+    mgr.on('open', touchActivity);
+    mgr.on('ping', touchActivity);
+    mgr.on('packet', touchActivity);
+    openSocket(mainNs, mgr, target);
+    for (const ns of reopen) {
+      if (!sockets.has(ns)) openSocket(ns, mgr, target);
+    }
+    reopen.clear();
+    startRefresh();
+    for (const handler of [...rebuildListeners]) {
+      try {
+        handler();
+      } catch (err) {
+        logger?.warn(`rebuild listener failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
   }
 
   function closeAllSockets(): void {
-    for (const sock of sockets.values()) {
-      sock.removeAllListeners();
-      sock.disconnect();
-    }
+    const closing = [...sockets.values()];
+    const mgr = manager;
     sockets.clear();
-    if (manager) {
-      manager._close();
-      manager = null;
+    manager = null;
+    for (const sock of closing) {
+      // disconnect first so app listeners still see the socket go down
+      sock.disconnect();
+      sock.removeAllListeners();
     }
+    mgr?._close();
   }
 
   function rebindAuth(target: ConnectionTarget): void {
@@ -266,7 +290,9 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     currentTarget = target;
 
     if (!target) {
+      applyEpoch++;
       closeAllSockets();
+      reopen.clear();
       stopRefresh();
       lastActivityAt = 0;
       markDown('detached');
@@ -275,8 +301,15 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
     if (endpointChanged || !manager) {
       const epoch = ++applyEpoch;
+      // tear down before the first await so nothing in between picks up an old endpoint's socket,
+      // the manager stays null until the signed query resolves
+      for (const ns of sockets.keys()) {
+        if (ns !== mainNs) reopen.add(ns);
+      }
+      closeAllSockets();
+      stopRefresh();
       try {
-        await rebuildManager(target);
+        await rebuildManager(target, epoch);
       } catch (err) {
         // a failed rebuild must not leave currentTarget pointing at a target we
         // never connected to, the same-target dedupe would swallow every retry
@@ -289,7 +322,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   }
 
   function health(): TransportStatus {
-    if (status.up && isStaleNow()) return { up: false, lastError: 'staleConnection' };
+    if (status.up && isDeadNow()) return { up: false, lastError: 'staleConnection' };
     return status;
   }
 
@@ -299,7 +332,14 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
   async function dispose(): Promise<void> {
     disposed = true;
+    applyEpoch++;
     closeAllSockets();
+    reopen.clear();
+    rebuildListeners.clear();
+    for (const timer of releaseTimers.values()) clearTimeout(timer);
+    releaseTimers.clear();
+    holds.clear();
+    unheld.clear();
     stopRefresh();
     currentTarget = null;
     status = { up: false };
@@ -311,24 +351,65 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   }
 
   function ensureSocket(namespace: string): Socket | null {
-    if (!currentTarget || !manager) return null;
-    let sock = sockets.get(namespace);
-    if (!sock) {
-      sock = openSocket(namespace, currentTarget);
-      bindSecondarySocketEvents(sock);
+    if (!currentTarget) return null;
+    // without a hold the namespace stays open for the transport's lifetime
+    if (!holds.has(namespace)) unheld.add(namespace);
+    if (!manager) {
+      reopen.add(namespace);
+      return null;
     }
-    return sock;
+    return sockets.get(namespace) ?? openSocket(namespace, manager, currentTarget);
+  }
+
+  function acquire(namespace: string): Unsubscribe {
+    holds.set(namespace, (holds.get(namespace) ?? 0) + 1);
+    clearTimeout(releaseTimers.get(namespace));
+    releaseTimers.delete(namespace);
+    let held = true;
+    return () => {
+      if (!held || disposed) return;
+      held = false;
+      const left = (holds.get(namespace) ?? 1) - 1;
+      if (left > 0) {
+        holds.set(namespace, left);
+        return;
+      }
+      holds.delete(namespace);
+      if (namespace === mainNs) return;
+      releaseTimers.set(
+        namespace,
+        setTimeout(() => closeReleased(namespace), releaseGraceMs),
+      );
+    };
+  }
+
+  function closeReleased(namespace: string): void {
+    releaseTimers.delete(namespace);
+    if (holds.has(namespace) || unheld.has(namespace)) return;
+    reopen.delete(namespace);
+    const sock = sockets.get(namespace);
+    if (!sock) return;
+    sockets.delete(namespace);
+    sock.disconnect();
+    sock.removeAllListeners();
+  }
+
+  function onRebuild(handler: () => void): Unsubscribe {
+    rebuildListeners.add(handler);
+    return () => {
+      rebuildListeners.delete(handler);
+    };
   }
 
   function reviveDeadSockets(): void {
     if (!currentTarget) return;
-    if (status.up && isStaleNow()) {
+    if (status.up && isDeadNow()) {
       // engine still claims connected but the wall clock says the socket died
       // in background — force-close it so every namespace reconnects now
       // instead of after the engine's own ping timeout
       logger?.debug('reviveDeadSockets: engine stale — forcing reconnect');
       lastActivityAt = Date.now();
-      sockets.get(mainNs)?.io.engine?.close();
+      manager?.engine?.close();
       return;
     }
     const auth = buildAuth(currentTarget);
@@ -343,11 +424,45 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     logger?.debug(`reviveDeadSockets: ${revived}/${sockets.size} reconnecting`);
   }
 
-  async function ensureAlive(): Promise<TransportStatus> {
-    if (disposed || !currentTarget) return health();
-    if (resolveQuery) await refreshQuery();
-    reviveDeadSockets();
-    return health();
+  function reconnectInactive(target: ConnectionTarget): void {
+    const auth = buildAuth(target);
+    for (const sock of sockets.values()) {
+      // an active socket is mid-handshake on an open engine, connect() would send a second CONNECT
+      if (sock.active) continue;
+      sock.auth = auth;
+      sock.connect();
+    }
+  }
+
+  function ensureAlive(): Promise<TransportStatus> {
+    if (ensureInflight) return ensureInflight;
+    const run = async (): Promise<TransportStatus> => {
+      if (disposed || !currentTarget) return health();
+      const main = sockets.get(mainNs);
+      if (main?.connected && !isDeadNow()) {
+        // the query only matters for the next engine open, a slow signer must not hold the probe
+        if (resolveQuery) refreshQuery();
+        const engine = main.io.engine;
+        const answered = await new Promise<boolean>((resolve) => {
+          main.timeout(PROBE_TIMEOUT_MS).emit('get-status', null, (err: Error | null) => resolve(!err));
+        });
+        // a half-open link only surfaces at the engine ping deadline, up to 45 s after resume
+        if (!answered && main.connected && main.io.engine === engine) {
+          logger?.debug('ensureAlive: probe unanswered, closing engine');
+          engine.close();
+        } else if (answered && currentTarget) {
+          reconnectInactive(currentTarget);
+        }
+        return health();
+      }
+      if (resolveQuery) await refreshQueryWithin(PROBE_TIMEOUT_MS);
+      reviveDeadSockets();
+      return health();
+    };
+    ensureInflight = run().finally(() => {
+      ensureInflight = null;
+    });
+    return ensureInflight;
   }
 
   return {
@@ -363,6 +478,8 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     dispose,
     socket,
     ensureSocket,
+    acquire,
+    onRebuild,
     reviveDeadSockets,
     ensureAlive,
   };

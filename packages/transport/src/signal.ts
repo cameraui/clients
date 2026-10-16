@@ -5,7 +5,7 @@ import type { Transport } from './transports/contract.js';
 export type ConnectionSignal =
   | { readonly kind: 'connecting' }
   | { readonly kind: 'online' }
-  | { readonly kind: 'degraded'; readonly channels: readonly TransportId[] }
+  | { readonly kind: 'degraded'; readonly channels: readonly TransportId[]; readonly reason?: 'first-connect' }
   | { readonly kind: 'offline'; readonly retryAt?: number }
   | { readonly kind: 'needs-auth' };
 
@@ -13,6 +13,7 @@ export interface ConnectionSignalOptions {
   readonly kernel: Kernel;
   readonly transports: readonly Transport[];
   readonly debounceMs?: number;
+  readonly firstConnectTimeoutMs?: number;
 }
 
 export interface ConnectionSignalHandle {
@@ -24,20 +25,24 @@ export interface ConnectionSignalHandle {
 }
 
 const DEFAULT_DEBOUNCE_MS = 1_500;
+const DEFAULT_FIRST_CONNECT_TIMEOUT_MS = 15_000;
 
 export function signalEquals(a: ConnectionSignal, b: ConnectionSignal): boolean {
   if (a.kind !== b.kind) return false;
-  if (a.kind === 'degraded' && b.kind === 'degraded') return a.channels.join(',') === b.channels.join(',');
+  if (a.kind === 'degraded' && b.kind === 'degraded') return a.reason === b.reason && a.channels.join(',') === b.channels.join(',');
   if (a.kind === 'offline' && b.kind === 'offline') return a.retryAt === b.retryAt;
   return true;
 }
 
 export function createConnectionSignal(options: ConnectionSignalOptions): ConnectionSignalHandle {
   const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+  const firstConnectTimeoutMs = options.firstConnectTimeoutMs ?? DEFAULT_FIRST_CONNECT_TIMEOUT_MS;
   const listeners = new Set<(signal: ConnectionSignal) => void>();
   const cleanups: Array<() => void> = [];
   let hasBeenOnline = false;
   let anyChannelEverUp = false;
+  let firstConnectOverdue = false;
+  let firstConnectTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingSignal: ConnectionSignal | null = null;
   let disposed = false;
@@ -56,13 +61,36 @@ export function createConnectionSignal(options: ConnectionSignalOptions): Connec
       case 'online': {
         const channels = options.transports.filter((t) => t.spec.phaseGating && !t.health().up).map((t) => t.spec.id);
         if (channels.length === 0) return { kind: 'online' };
-        // transports still doing their FIRST connect are not degraded
-        return anyChannelEverUp ? { kind: 'degraded', channels } : { kind: 'connecting' };
+        if (anyChannelEverUp) return { kind: 'degraded', channels };
+        // transports still doing their FIRST connect are not degraded, until that takes long enough to point at
+        // a blocked path (a reverse proxy without websocket upgrade answers REST but never lets a channel up)
+        return firstConnectOverdue ? { kind: 'degraded', channels, reason: 'first-connect' } : { kind: 'connecting' };
       }
     }
   }
 
   let current: ConnectionSignal = compute();
+
+  function clearFirstConnectTimer(): void {
+    if (firstConnectTimer !== null) {
+      clearTimeout(firstConnectTimer);
+      firstConnectTimer = null;
+    }
+  }
+
+  function watchFirstConnect(): void {
+    if (options.kernel.phase.kind !== 'online' || anyChannelEverUp) {
+      clearFirstConnectTimer();
+      firstConnectOverdue = false;
+      return;
+    }
+    if (firstConnectTimer !== null || firstConnectOverdue || !(firstConnectTimeoutMs > 0 && Number.isFinite(firstConnectTimeoutMs))) return;
+    firstConnectTimer = setTimeout(() => {
+      firstConnectTimer = null;
+      firstConnectOverdue = true;
+      apply(compute());
+    }, firstConnectTimeoutMs);
+  }
 
   function clearPending(): void {
     if (pendingTimer !== null) {
@@ -118,6 +146,7 @@ export function createConnectionSignal(options: ConnectionSignalOptions): Connec
         hasBeenOnline = false;
         anyChannelEverUp = false;
       }
+      watchFirstConnect();
       recompute();
     }),
   );
@@ -125,11 +154,13 @@ export function createConnectionSignal(options: ConnectionSignalOptions): Connec
     cleanups.push(
       transport.on('up', () => {
         anyChannelEverUp = true;
+        watchFirstConnect();
         recompute();
       }),
     );
     cleanups.push(transport.on('down', () => recompute()));
   }
+  watchFirstConnect();
 
   return {
     get current() {
@@ -144,6 +175,7 @@ export function createConnectionSignal(options: ConnectionSignalOptions): Connec
     dispose() {
       disposed = true;
       clearPending();
+      clearFirstConnectTimer();
       for (const fn of cleanups) fn();
       listeners.clear();
     },

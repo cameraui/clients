@@ -192,11 +192,26 @@ describe('reducer — TOKENS_REFRESHED', () => {
     }
   });
 
-  it('ignored in idle / offline', () => {
+  it('ignored in idle', () => {
     const ctx = makeCtx();
     expect(reducer(IDLE, { type: 'TOKENS_REFRESHED', tokens: TOKENS }, ctx)).toBe(IDLE);
-    const offline: ConnectionPhase = { kind: 'offline', instanceId: 'a', lastError: 'x', nextRetryAt: 0 };
-    expect(reducer(offline, { type: 'TOKENS_REFRESHED', tokens: TOKENS }, ctx)).toBe(offline);
+  });
+
+  it('offline keeps a refresh that landed after the drop as pending tokens', () => {
+    const ctx = makeCtx();
+    const offline: ConnectionPhase = { kind: 'offline', instanceId: 'a', lastError: 'x', nextRetryAt: 5 };
+    const fresh: Tokens = { access: 'at-new', refresh: 'rt-new' };
+    const next = reducer(offline, { type: 'TOKENS_REFRESHED', tokens: fresh }, ctx);
+    expect(next).toEqual({ ...offline, pendingTokens: fresh });
+    expect(reducer(next, { type: 'TOKENS_REFRESHED', tokens: { ...fresh } }, ctx)).toBe(next);
+  });
+
+  it('the next round starts with the tokens refreshed while offline', () => {
+    const ctx = makeCtx();
+    const fresh: Tokens = { access: 'at-new', refresh: 'rt-new' };
+    const offline: ConnectionPhase = { kind: 'offline', instanceId: 'a', lastError: 'x', nextRetryAt: 5, pendingTokens: fresh };
+    expect(reducer(offline, { type: 'USER_RETRY' }, ctx)).toEqual({ kind: 'discovering', instanceId: 'a', pendingTokens: fresh });
+    expect(reducer(offline, { type: 'BOOT', instanceId: 'a' }, ctx)).toEqual({ kind: 'discovering', instanceId: 'a', pendingTokens: fresh });
   });
 
   it('online with identical tokens → returns same phase reference (idempotent)', () => {
@@ -315,16 +330,26 @@ describe('reducer — BACKOFF_HINT', () => {
     });
   });
 
-  it('offline + hint shorter than current → keeps phase unchanged (never shorten)', () => {
+  it('offline + hint shorter than an earlier hint → keeps phase unchanged (never shorten)', () => {
     const ctx = makeCtx({ now: () => 1_000 });
     const offline: ConnectionPhase = {
       kind: 'offline',
       instanceId: 'a',
       lastError: 'down',
-      nextRetryAt: 61_000, // 60s out — beyond what the 30s hint would set
+      nextRetryAt: 61_000,
+      backoffHint: { retryAfterMs: 60_000, setAt: 1_000 },
     };
     const next = reducer(offline, { type: 'BACKOFF_HINT', retryAfterMs: 30_000 }, ctx);
     expect(next).toBe(offline);
+  });
+
+  it('records the first hint even when it ends before the default retry', () => {
+    const ctx = makeCtx({ now: () => 1_000 });
+    const offline: ConnectionPhase = { kind: 'offline', instanceId: 'a', lastError: 'down', nextRetryAt: 6_000 };
+    const next = reducer(offline, { type: 'BACKOFF_HINT', retryAfterMs: 3_000, source: 'retry-after' }, ctx);
+    if (next.kind !== 'offline') throw new Error('expected offline');
+    expect(next.nextRetryAt).toBe(4_000);
+    expect(next.backoffHint).toEqual({ retryAfterMs: 3_000, setAt: 1_000, source: 'retry-after' });
   });
 
   it('non-offline phase → no-op', () => {

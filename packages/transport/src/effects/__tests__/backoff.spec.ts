@@ -280,11 +280,69 @@ describe('attachBackoff — firstAttemptDelayMs', () => {
     expect(onScheduled).toHaveBeenCalledWith(1, 1_000);
   });
 
+  it('shortens the first attempt of an offline phase the reducer produced', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const onScheduled = vi.fn();
+    const onFire = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => 1_500, onScheduled, onFire });
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'radio not ready' });
+    expect(onScheduled).toHaveBeenCalledWith(1, 1_500);
+
+    vi.advanceTimersByTime(1_500);
+    expect(onFire).toHaveBeenCalledTimes(1);
+    expect(kernel.phase.kind).toBe('discovering');
+  });
+
   it('never undercuts a server backoff hint', () => {
-    const kernel = createKernel({ context: makeCtx(), initial: offlineWith(T0 + 30_000) });
+    const kernel = createKernel({ context: makeCtx() });
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => 1_500, onScheduled });
-    expect(onScheduled).toHaveBeenCalledWith(1, 30_000);
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    kernel.dispatch({ type: 'BACKOFF_HINT', retryAfterMs: 30_000, source: 'retry-after' });
+    expect(onScheduled).toHaveBeenLastCalledWith(1, 30_000);
+  });
+
+  it('waits for a server hint that lands in the same millisecond as the failure', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const onScheduled = vi.fn();
+    const onFire = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => 1_500, onScheduled, onFire });
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    kernel.dispatch({ type: 'BACKOFF_HINT', retryAfterMs: 5_000, source: 'retry-after' });
+    expect(onScheduled).toHaveBeenLastCalledWith(1, 5_000);
+
+    vi.advanceTimersByTime(4_999);
+    expect(onFire).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(1);
+    expect(onFire).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for a server hint shorter than the default retry', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const onScheduled = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => 1_500, onScheduled });
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    kernel.dispatch({ type: 'BACKOFF_HINT', retryAfterMs: 3_000, source: 'retry-after' });
+    expect(onScheduled).toHaveBeenLastCalledWith(1, 3_000);
+  });
+
+  it('keeps the schedule when a server hint is shorter than it', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const onScheduled = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000], onScheduled });
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    kernel.dispatch({ type: 'BACKOFF_HINT', retryAfterMs: 3_000, source: 'retry-after' });
+    expect(onScheduled).toHaveBeenLastCalledWith(1, 5_000);
   });
 
   it('falls back to the schedule when the hook returns null', () => {
@@ -292,5 +350,59 @@ describe('attachBackoff — firstAttemptDelayMs', () => {
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule: [5_000], firstAttemptDelayMs: () => null, onScheduled });
     expect(onScheduled).toHaveBeenCalledWith(1, 5_000);
+  });
+
+  it('restarts the schedule when a retry from outside lands while the fast path is open', () => {
+    let woke = false;
+    const kernel = createKernel({ context: makeCtx() });
+    const onScheduled = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000, 10_000, 30_000], firstAttemptDelayMs: () => (woke ? 1_500 : null), onScheduled });
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    vi.advanceTimersByTime(5_000);
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    vi.advanceTimersByTime(10_000);
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    expect(onScheduled).toHaveBeenLastCalledWith(3, 30_000);
+
+    woke = true;
+    kernel.dispatch({ type: 'USER_RETRY' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    expect(onScheduled).toHaveBeenLastCalledWith(1, 1_500);
+
+    vi.advanceTimersByTime(1_500);
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    expect(onScheduled).toHaveBeenLastCalledWith(2, 10_000);
+  });
+
+  it('keeps its place in the schedule for a retry from outside while the fast path is closed', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const onScheduled = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000, 10_000, 30_000], firstAttemptDelayMs: () => null, onScheduled });
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    vi.advanceTimersByTime(5_000);
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    expect(onScheduled).toHaveBeenLastCalledWith(2, 10_000);
+
+    kernel.dispatch({ type: 'USER_RETRY' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    expect(onScheduled).toHaveBeenLastCalledWith(2, 10_000);
+  });
+
+  it('never restarts the schedule on its own retries while the fast path is open', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const onScheduled = vi.fn();
+    attachBackoff({ kernel, schedule: [5_000, 10_000, 30_000], firstAttemptDelayMs: () => 1_500, onScheduled });
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    vi.advanceTimersByTime(1_500);
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    vi.advanceTimersByTime(10_000);
+    kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
+    expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([1_500, 10_000, 30_000]);
   });
 });

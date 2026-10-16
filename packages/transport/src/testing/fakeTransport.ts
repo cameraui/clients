@@ -13,6 +13,7 @@ export class FakeTransport implements Transport {
   readonly applyCalls: (ConnectionTarget | null)[] = [];
 
   failNextApplies = 0;
+  failWith: unknown;
   ensureAliveCalls = 0;
 
   private readonly emitter = new TransportEmitter();
@@ -35,7 +36,7 @@ export class FakeTransport implements Transport {
     if (this.failNextApplies > 0) {
       this.failNextApplies--;
       this.currentStatus = { up: false, lastError: 'apply failed' };
-      throw new Error('apply failed');
+      throw this.failWith ?? new Error('apply failed');
     }
     this.currentTarget = target;
     this.currentStatus = target ? { up: true } : { up: false };
@@ -74,8 +75,8 @@ export class FakeTransport implements Transport {
     this.emitter.emit('up', undefined);
   }
 
-  emitAuthError(status?: number): void {
-    this.emitter.emit('auth-error', { status });
+  emitAuthError(status?: number, access?: string): void {
+    this.emitter.emit('auth-error', access === undefined ? { status } : { status, access });
   }
 
   get target(): ConnectionTarget | null {

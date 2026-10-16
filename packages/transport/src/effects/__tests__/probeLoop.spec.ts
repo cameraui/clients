@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createKernel } from '../../core/kernel.js';
+import { attachPersistence } from '../persistence.js';
 import { attachProbeLoop, makeProbeFailure } from '../probeLoop.js';
 
 import type { ConnectionPhase, Endpoint, ReducerContext, Tokens } from '../../core/types.js';
@@ -255,6 +256,73 @@ describe('attachProbeLoop — cancellation-shaped failures', () => {
     expect(kernel.phase.kind).toBe('discovering');
     detach();
   });
+
+  it('goes offline after three rounds in which every probe was canceled', async () => {
+    vi.useFakeTimers();
+    try {
+      const probe = vi.fn<ProbeFn>(async () => {
+        throw makeProbeFailure('aborted', 'request canceled');
+      });
+      const discover = vi.fn(async () => [LAN, WAN]);
+      const onAllFailed = vi.fn();
+      const kernel = createKernel({ context: makeCtx(), initial: discoveringPhase() });
+      const detach = attachProbeLoop({ kernel, discover, probe, onAllFailed });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(kernel.phase.kind).toBe('offline');
+      expect(discover).toHaveBeenCalledTimes(3);
+      expect(onAllFailed).toHaveBeenCalledTimes(1);
+      expect(kernel.phase.kind === 'offline' && kernel.phase.lastError).toContain('request canceled');
+      detach();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts canceled rounds again after the phase changed', async () => {
+    vi.useFakeTimers();
+    try {
+      const probe = vi.fn<ProbeFn>(async () => {
+        throw makeProbeFailure('aborted', 'request canceled');
+      });
+      const discover = vi.fn(async () => [LAN]);
+      const kernel = createKernel({ context: makeCtx(), initial: discoveringPhase() });
+      const detach = attachProbeLoop({ kernel, discover, probe });
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(kernel.phase.kind).toBe('offline');
+
+      kernel.dispatch({ type: 'USER_RETRY' });
+      await vi.advanceTimersByTimeAsync(250);
+      expect(kernel.phase.kind).toBe('discovering');
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(kernel.phase.kind).toBe('offline');
+      expect(discover).toHaveBeenCalledTimes(6);
+      detach();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('detach cancels a pending re-run of a canceled round', async () => {
+    vi.useFakeTimers();
+    try {
+      const discover = vi.fn(async () => [LAN]);
+      const kernel = createKernel({ context: makeCtx(), initial: discoveringPhase() });
+      const detach = attachProbeLoop({
+        kernel,
+        discover,
+        probe: async () => {
+          throw makeProbeFailure('aborted', 'request canceled');
+        },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      detach();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });
 
 describe('attachProbeLoop — re-entry + abort', () => {
@@ -337,6 +405,98 @@ describe('attachProbeLoop — lastTarget tokens', () => {
 
     await vi.waitFor(() => expect(kernel.phase.kind).toBe('online'));
     expect(probe.mock.calls[0]![0].lastTokens).toEqual(lastTokens);
+    detach();
+  });
+
+  it('waits for a slow storage restore before reading lastTarget', async () => {
+    const stored: Tokens = { access: 'at-stored', refresh: 'rt-stored' };
+    const storage = {
+      get: () => new Promise<string>((resolve) => setTimeout(() => resolve(JSON.stringify({ endpoint: LAN, tokens: stored, savedAt: 0, version: 1 })), 5)),
+      set: () => {},
+      del: () => {},
+    };
+    const kernel = createKernel({ context: makeCtx() });
+    const persistence = attachPersistence({ kernel, storage });
+    const probe = vi.fn<ProbeFn>(async (ctx) => {
+      if (!ctx.lastTokens) throw makeProbeFailure('needs-auth', 'no stored tokens');
+      return ctx.lastTokens;
+    });
+    const detach = attachProbeLoop({
+      kernel,
+      discover: async () => [LAN],
+      probe,
+      lastTarget: () => persistence.peek(),
+      ready: () => persistence.ready,
+    });
+
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+
+    await vi.waitFor(() => expect(kernel.phase.kind).toBe('online'));
+    expect(probe.mock.calls[0]![0].lastTokens).toEqual(stored);
+    detach();
+    persistence.detach();
+  });
+});
+
+describe('attachProbeLoop: tokens refreshed during the round', () => {
+  it('keeps them when the probe only confirmed the old ones', async () => {
+    const lastTokens: Tokens = { access: 'at-1', refresh: 'rt-1' };
+    const refreshed: Tokens = { access: 'at-2', refresh: 'rt-2' };
+    let confirm: (() => void) | undefined;
+    const kernel = createKernel({ context: makeCtx(), initial: discoveringPhase() });
+    const detach = attachProbeLoop({
+      kernel,
+      discover: async () => [LAN],
+      probe: (ctx) => new Promise<Tokens>((resolve) => (confirm = () => resolve(ctx.lastTokens!))),
+      lastTarget: () => ({ endpoint: LAN, tokens: lastTokens }),
+    });
+    await vi.waitFor(() => expect(confirm).toBeDefined());
+
+    kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: refreshed });
+    confirm!();
+
+    await vi.waitFor(() => expect(kernel.phase.kind).toBe('online'));
+    expect(kernel.phase.kind === 'online' && kernel.phase.target.tokens).toBe(refreshed);
+    detach();
+  });
+
+  it('takes the tokens a probe refreshed itself', async () => {
+    const probeRefreshed: Tokens = { access: 'at-3', refresh: 'rt-3' };
+    let finish: (() => void) | undefined;
+    const kernel = createKernel({ context: makeCtx(), initial: discoveringPhase() });
+    const detach = attachProbeLoop({
+      kernel,
+      discover: async () => [LAN],
+      probe: () => new Promise<Tokens>((resolve) => (finish = () => resolve(probeRefreshed))),
+      lastTarget: () => ({ endpoint: LAN, tokens: { access: 'at-1' } }),
+    });
+    await vi.waitFor(() => expect(finish).toBeDefined());
+
+    kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: { access: 'at-2' } });
+    finish!();
+
+    await vi.waitFor(() => expect(kernel.phase.kind).toBe('online'));
+    expect(kernel.phase.kind === 'online' && kernel.phase.target.tokens).toBe(probeRefreshed);
+    detach();
+  });
+
+  it('keeps tokens seeded while offline over a refresh of the old session', async () => {
+    const seeded: Tokens = { access: 'at-login', refresh: 'rt-login' };
+    const kernel = createKernel({
+      context: makeCtx(),
+      initial: { kind: 'offline', instanceId: 'a', lastError: 'down', nextRetryAt: 0, pendingTokens: { access: 'at-2', refresh: 'rt-2' } },
+    });
+    const detach = attachProbeLoop({
+      kernel,
+      discover: async () => [LAN],
+      probe: async (ctx) => ctx.lastTokens!,
+      lastTarget: () => ({ endpoint: LAN, tokens: seeded }),
+    });
+
+    kernel.dispatch({ type: 'USER_RETRY' });
+
+    await vi.waitFor(() => expect(kernel.phase.kind).toBe('online'));
+    expect(kernel.phase.kind === 'online' && kernel.phase.target.tokens).toBe(seeded);
     detach();
   });
 });

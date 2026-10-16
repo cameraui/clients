@@ -1,7 +1,9 @@
+import { refusedByServer } from '../transports/closeCodes.js';
+import { isSameTarget } from '../transports/contract.js';
+
 import type { Kernel } from '../core/kernel.js';
 import type { ConnectionPhase, ConnectionTarget } from '../core/types.js';
 import type { Transport } from '../transports/contract.js';
-import { isSameTarget } from '../transports/contract.js';
 
 export type Detach = () => void;
 
@@ -48,10 +50,10 @@ export function attachTransportSync(options: TransportSyncOptions): Detach {
     applied.set(transport, target);
     transport.apply(target).catch((err: unknown) => {
       options.onError?.(transport, target, err);
-      if (applied.get(transport) === target) {
-        applied.delete(transport);
-        scheduleRetry(transport);
-      }
+      // a refused target stays applied, only a new target or new tokens apply again
+      if (applied.get(transport) !== target || refusedByServer(err)) return;
+      applied.delete(transport);
+      scheduleRetry(transport);
     });
   }
 

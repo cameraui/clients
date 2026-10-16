@@ -183,6 +183,200 @@ describe('createNativeHttpAdapter', () => {
 
     await expect(p).rejects.toBeInstanceOf(CanceledError);
   });
+
+  it('rejects with a timeout error when the native call outlives the axios timeout', async () => {
+    const request: NativeHttpRequest = () => new Promise<NativeHttpResult>(() => {});
+    const adapter = createNativeHttpAdapter({ request });
+
+    const started = Date.now();
+    const err = await adapter(cfg({ url: 'https://nvr.seydx.dev/api/hang', timeout: 40 })).catch((e: unknown) => e);
+
+    expect(axios.isAxiosError(err)).toBe(true);
+    expect((err as AxiosError).code).toBe(AxiosError.ECONNABORTED);
+    expect((err as AxiosError).message).toBe('timeout of 40ms exceeded');
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe('createNativeHttpAdapter binary responses', () => {
+  const GZIP_HEAD = [0x1f, 0x8b, 0x08, 0x00];
+
+  function base64Of(bytes: Uint8Array): string {
+    return Buffer.from(bytes).toString('base64');
+  }
+
+  it('decodes a base64 arraybuffer body back to the original bytes', async () => {
+    const request = vi.fn<NativeHttpRequest>(async () => ({
+      data: base64Of(new Uint8Array(GZIP_HEAD)),
+      status: 200,
+      headers: { 'content-type': 'application/gzip' },
+    }));
+    const adapter = createNativeHttpAdapter({ request });
+
+    const res = await adapter(cfg({ url: 'https://nvr.seydx.dev/api/backup/download', method: 'post', responseType: 'arraybuffer' }));
+
+    expect(request.mock.calls[0]![0].responseType).toBe('arraybuffer');
+    expect(res.data).toBeInstanceOf(ArrayBuffer);
+    expect([...new Uint8Array(res.data as ArrayBuffer)]).toEqual(GZIP_HEAD);
+  });
+
+  it('returns a Blob with the response content type for responseType blob', async () => {
+    const request = vi.fn<NativeHttpRequest>(async () => ({
+      data: base64Of(new Uint8Array(GZIP_HEAD)),
+      status: 200,
+      headers: { 'Content-Type': 'application/gzip' },
+    }));
+    const adapter = createNativeHttpAdapter({ request });
+
+    const res = await adapter(cfg({ url: 'https://nvr.seydx.dev/api/file', responseType: 'blob' }));
+
+    expect(res.data).toBeInstanceOf(Blob);
+    expect((res.data as Blob).type).toBe('application/gzip');
+    expect([...new Uint8Array(await (res.data as Blob).arrayBuffer())]).toEqual(GZIP_HEAD);
+  });
+
+  it('keeps the bytes 1:1 instead of handing over the 4/3 larger base64 text', async () => {
+    const original = new Uint8Array(5 * 1024 * 1024);
+    for (let i = 0; i < original.length; i++) original[i] = (i * 31 + (i >> 8)) & 0xff;
+    const wire = base64Of(original);
+    const request = vi.fn<NativeHttpRequest>(async () => ({ data: wire, status: 200, headers: { 'content-type': 'application/gzip' } }));
+    const adapter = createNativeHttpAdapter({ request });
+
+    const res = await adapter(cfg({ url: 'https://nvr.seydx.dev/api/backup/download', responseType: 'arraybuffer' }));
+    const saved = new Uint8Array(await new Blob([res.data as ArrayBuffer]).arrayBuffer());
+
+    expect(wire.length / original.length).toBeCloseTo(4 / 3, 2);
+    expect(saved.byteLength).toBe(original.byteLength);
+    expect(Buffer.compare(Buffer.from(saved), Buffer.from(original))).toBe(0);
+  });
+
+  it('keeps a plain-text error body that is not base64', async () => {
+    const request = vi.fn<NativeHttpRequest>(async () => ({ data: 'Backup failed!', status: 500, headers: { 'content-type': 'text/plain' } }));
+    const adapter = createNativeHttpAdapter({ request });
+
+    await expect(adapter(cfg({ url: 'https://nvr.seydx.dev/api/backup/download', responseType: 'arraybuffer' }))).rejects.toMatchObject({
+      response: { status: 500, data: 'Backup failed!' },
+    });
+  });
+
+  it('keeps a plain-text error body made only of base64 letters and spaces', async () => {
+    const request = vi.fn<NativeHttpRequest>(async () => ({ data: 'Bad Gateway', status: 502, headers: { 'content-type': 'text/plain' } }));
+    const adapter = createNativeHttpAdapter({ request });
+
+    await expect(adapter(cfg({ url: 'https://nvr.seydx.dev/api/backup/download', responseType: 'arraybuffer' }))).rejects.toMatchObject({
+      response: { status: 502, data: 'Bad Gateway' },
+    });
+  });
+
+  it('leaves parsed JSON bodies alone for binary response types', async () => {
+    const request = vi.fn<NativeHttpRequest>(async () => ({ data: { message: 'nope' }, status: 403, headers: { 'content-type': 'application/json' } }));
+    const adapter = createNativeHttpAdapter({ request });
+
+    await expect(adapter(cfg({ url: 'https://nvr.seydx.dev/api/backup/download', responseType: 'arraybuffer' }))).rejects.toMatchObject({
+      response: { status: 403, data: { message: 'nope' } },
+    });
+  });
+
+  it('does not touch text responses', async () => {
+    const request = vi.fn<NativeHttpRequest>(async () => ({ data: 'aGVsbG8=', status: 200, headers: { 'content-type': 'text/plain' } }));
+    const adapter = createNativeHttpAdapter({ request });
+
+    const res = await adapter(cfg({ url: 'https://nvr.seydx.dev/api/x' }));
+
+    expect(res.data).toBe('aGVsbG8=');
+  });
+});
+
+describe('createNativeHttpAdapter binary request bodies', () => {
+  function capture() {
+    const request = vi.fn<NativeHttpRequest>(async () => ({ data: {}, status: 200, headers: { 'content-type': 'application/json' } }));
+    return { request, adapter: createNativeHttpAdapter({ request }) };
+  }
+
+  function axiosDefaultHeaders(): AxiosHeaders {
+    return AxiosHeaders.from({ Accept: 'application/json, text/plain, */*', 'Content-Type': 'application/x-www-form-urlencoded' });
+  }
+
+  it('sends FormData as an entry list with a multipart content type and no boundary', async () => {
+    const { request, adapter } = capture();
+    const form = new FormData();
+    form.append('name', 'front door');
+    form.append('file', new Blob([new Uint8Array([0x1f, 0x8b, 0x08, 0x00])], { type: 'application/gzip' }), 'backup.tar.gz');
+    form.append('raw', new Blob([new Uint8Array([1, 2, 3])]), 'raw.bin');
+
+    await adapter(cfg({ url: 'https://nvr.seydx.dev/api/backup/restore', method: 'post', data: form, headers: axiosDefaultHeaders() }));
+
+    const init = request.mock.calls[0]![0];
+    expect(init.dataType).toBe('formData');
+    expect(init.data).toEqual([
+      { key: 'name', value: 'front door', type: 'string' },
+      { key: 'file', value: 'H4sIAA==', type: 'base64File', fileName: 'backup.tar.gz', contentType: 'application/gzip' },
+      { key: 'raw', value: 'AQID', type: 'base64File', fileName: 'raw.bin', contentType: 'application/octet-stream' },
+    ]);
+    expect(init.headers['Content-Type']).toBe('multipart/form-data');
+    expect(Object.keys(init.headers).filter((k) => k.toLowerCase() === 'content-type')).toHaveLength(1);
+  });
+
+  it('sends a Blob body as a base64 file with its own type', async () => {
+    const { request, adapter } = capture();
+
+    await adapter(
+      cfg({
+        url: 'https://nvr.seydx.dev/api/users/me/avatar',
+        method: 'put',
+        data: new Blob([new Uint8Array([0xff, 0xd8, 0xff])], { type: 'image/jpeg' }),
+        headers: axiosDefaultHeaders(),
+      }),
+    );
+
+    const init = request.mock.calls[0]![0];
+    expect(init.dataType).toBe('file');
+    expect(init.data).toBe('/9j/');
+    expect(init.headers['Content-Type']).toBe('image/jpeg');
+  });
+
+  it('sends ArrayBuffer and typed array bodies as octet-stream files', async () => {
+    const { request, adapter } = capture();
+    const bytes = new Uint8Array([0, 1, 2, 3, 4, 5]);
+
+    await adapter(cfg({ url: 'https://nvr.seydx.dev/api/x', method: 'post', data: bytes.buffer, headers: axiosDefaultHeaders() }));
+    await adapter(cfg({ url: 'https://nvr.seydx.dev/api/x', method: 'post', data: bytes.subarray(2, 4) }));
+
+    expect(request.mock.calls[0]![0]).toMatchObject({ dataType: 'file', data: 'AAECAwQF', headers: { 'Content-Type': 'application/octet-stream' } });
+    expect(request.mock.calls[1]![0]).toMatchObject({ dataType: 'file', data: 'AgM=', headers: { 'Content-Type': 'application/octet-stream' } });
+  });
+
+  it('keeps an explicit content type on a binary body', async () => {
+    const { request, adapter } = capture();
+
+    await adapter(
+      cfg({ url: 'https://nvr.seydx.dev/api/x', method: 'post', data: new Uint8Array([1]).buffer, headers: AxiosHeaders.from({ 'Content-Type': 'application/x-tar' }) }),
+    );
+
+    expect(request.mock.calls[0]![0]).toMatchObject({ dataType: 'file', data: 'AQ==', headers: { 'Content-Type': 'application/x-tar' } });
+  });
+
+  it('round-trips a large binary body through base64 without loss', async () => {
+    const { request, adapter } = capture();
+    const original = new Uint8Array(3 * 1024 * 1024 + 7);
+    for (let i = 0; i < original.length; i++) original[i] = (i * 7) & 0xff;
+
+    await adapter(cfg({ url: 'https://nvr.seydx.dev/api/x', method: 'post', data: original.buffer }));
+
+    const init = request.mock.calls[0]![0];
+    expect(init.dataType).toBe('file');
+    expect(typeof init.data).toBe('string');
+    expect(Buffer.compare(Buffer.from(init.data as string, 'base64'), Buffer.from(original))).toBe(0);
+  });
+
+  it('leaves JSON and string bodies on the plain path without a dataType', async () => {
+    const { request, adapter } = capture();
+
+    await adapter(cfg({ url: 'https://nvr.seydx.dev/api/x', method: 'post', data: '{"a":1}', headers: AxiosHeaders.from({ 'Content-Type': 'application/json' }) }));
+
+    expect(request.mock.calls[0]![0].dataType).toBeUndefined();
+    expect(request.mock.calls[0]![0].data).toEqual({ a: 1 });
+  });
 });
 
 describe('applyNativeHttp', () => {
@@ -221,5 +415,39 @@ describe('applyNativeHttp', () => {
     await client.get('https://192.168.178.27:3443/api/instances');
     expect(native).not.toHaveBeenCalled();
     expect(fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps excluded hostnames on the fallback even when they look public', async () => {
+    const native = vi.fn<NativeHttpRequest>(async () => ({ data: '{}', status: 200, headers: {} }));
+    const fallback = vi.fn(async (config: InternalAxiosRequestConfig) => ({
+      data: 'fallback',
+      status: 200,
+      statusText: '',
+      headers: new AxiosHeaders(),
+      config,
+      request: null,
+    }));
+    const exclude = vi.fn((url: string) => new URL(url).hostname === 'nas.fritz.box');
+
+    const client = axios.create();
+    client.defaults.adapter = fallback;
+    applyNativeHttp(client, { enabled: true, request: native, exclude });
+
+    await client.get('https://nas.fritz.box:3443/api/instances');
+    expect(native).not.toHaveBeenCalled();
+    expect(fallback).toHaveBeenCalledTimes(1);
+    expect(exclude).toHaveBeenCalledWith('https://nas.fritz.box:3443/api/instances');
+
+    await client.get('https://nvr.seydx.dev/api/instances');
+    expect(native).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('shouldUseNativeHttp with exclude', () => {
+  it('rejects excluded URLs and keeps the default without one', () => {
+    const config = cfg({ baseURL: 'https://nas.fritz.box/api', url: '/instances' });
+    expect(shouldUseNativeHttp(config)).toBe(true);
+    expect(shouldUseNativeHttp(config, () => true)).toBe(false);
+    expect(shouldUseNativeHttp(config, () => false)).toBe(true);
   });
 });

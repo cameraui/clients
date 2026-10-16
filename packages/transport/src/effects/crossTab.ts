@@ -7,12 +7,19 @@ export interface CrossTabSource extends EventTarget {
   // Marker so we can be strict about what we accept.
 }
 
+export interface CrossTabPayload {
+  readonly endpoint?: ConnectionTarget['endpoint'];
+  readonly tokens: ConnectionTarget['tokens'];
+}
+
 export interface CrossTabOptions {
   readonly kernel: Kernel;
   readonly key?: string;
   readonly source?: CrossTabSource;
+  readonly accept?: (payload: CrossTabPayload, current: ConnectionTarget | null) => boolean;
   readonly absorb?: (target: ConnectionTarget | null) => void;
   readonly onTokensReceived?: (tokens: ConnectionTarget['tokens']) => void;
+  readonly onTokensIgnored?: (payload: CrossTabPayload) => void;
   readonly onResetReceived?: () => void;
   readonly onError?: (op: 'parse', err: unknown) => void;
 }
@@ -61,7 +68,14 @@ export function attachCrossTab(options: CrossTabOptions): Detach {
     }
     if (!parsed?.tokens?.access) return;
 
-    const k = options.kernel.phase.kind;
+    const payload: CrossTabPayload = { endpoint: parsed.endpoint, tokens: parsed.tokens };
+    const phase = options.kernel.phase;
+    if (options.accept && !options.accept(payload, phase.kind === 'online' ? phase.target : null)) {
+      options.onTokensIgnored?.(payload);
+      return;
+    }
+
+    const k = phase.kind;
     if (k !== 'online') {
       if (parsed.endpoint?.url) {
         options.absorb?.({ endpoint: parsed.endpoint, tokens: parsed.tokens });

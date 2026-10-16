@@ -8,7 +8,7 @@ export { attachNetworkChange } from './effects/networkChange.js';
 export { attachPersistence, localStorageAdapter, memoryStorageAdapter } from './effects/persistence.js';
 export { attachPresence } from './effects/presence.js';
 export { attachProbeLoop, isProbeFailure, makeProbeFailure } from './effects/probeLoop.js';
-export { attachTokenLifecycle } from './effects/tokenLifecycle.js';
+export { attachTokenLifecycle, localAccessExpiry } from './effects/tokenLifecycle.js';
 export { attachTransportSync } from './effects/transportSync.js';
 export { attachWorkerBridge } from './effects/workerBridge.js';
 export { createConnectionJournal } from './journal.js';
@@ -34,7 +34,7 @@ export type {
 } from './core/types.js';
 export type { BackgroundProbe, BackgroundProbeOptions, BackgroundProbeOutcome } from './effects/backgroundProbe.js';
 export type { BackoffOptions } from './effects/backoff.js';
-export type { CrossTabOptions, CrossTabSource } from './effects/crossTab.js';
+export type { CrossTabOptions, CrossTabPayload, CrossTabSource } from './effects/crossTab.js';
 export type { DegradedRecoveryOptions } from './effects/degradedRecovery.js';
 export type { NetworkChangeOptions, NetworkChangeSource } from './effects/networkChange.js';
 export type { PersistedTarget, Persistence, PersistenceOptions, StorageAdapter } from './effects/persistence.js';

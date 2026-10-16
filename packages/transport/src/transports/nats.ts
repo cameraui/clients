@@ -1,6 +1,6 @@
 import { createRPCClient } from '@camera.ui/rpc';
 
-import { classifyClose } from './closeCodes.js';
+import { classifyClose, refusedByServer } from './closeCodes.js';
 import { isEndpointChange, isSameTarget, TransportEmitter } from './contract.js';
 
 import type { Logger } from '@camera.ui/logger';
@@ -16,6 +16,8 @@ const NATS_SPEC: TransportSpec = {
 };
 
 const RESOLVE_RETRY_MIN_MS = 3_000;
+const DIAL_GRACE_MS = 2_000;
+const CLIENT_DEFAULT_PING_INTERVAL_MS = 120_000;
 
 export interface ResolveServersContext {
   readonly target: ConnectionTarget;
@@ -79,6 +81,8 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   const pingInterval = options.pingInterval ?? 25_000;
   const pingTimeout = options.pingTimeout ?? 20_000;
   const maxPingOut = options.maxPingOut ?? 1;
+  const heartbeatInterval = pingInterval || CLIENT_DEFAULT_PING_INTERVAL_MS;
+  const heartbeatWindow = heartbeatInterval + (pingTimeout > 0 ? pingTimeout : heartbeatInterval);
   const logger = options.logger;
   const resolveServers = options.resolveServers;
   const resolveRefreshMs = options.resolveRefreshMs ?? 0;
@@ -93,9 +97,16 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   let disposed = false;
   let connId: string | null = null;
   let applyEpoch = 0;
-  let pendingConnectAbort: AbortController | null = null;
+  let dialAbort: AbortController | null = null;
+  let dialAttempt: { readonly startedAt: number; readonly settled: Promise<void> } | null = null;
+  // the server refused this target for good, only a new token or target dials again
+  let parked = false;
   let poolRefreshAt = 0;
   let poolRefreshing = false;
+  // token in the server list the client dials with, reconnects keep using it until setServers
+  let dialAccess: string | undefined;
+  // the client clears isStale only on its own heartbeat pong, an answered probe holds for the same window
+  let probedUntil = 0;
 
   function buildServers(target: ConnectionTarget): string[] {
     const url = new URL(target.endpoint.url);
@@ -103,7 +114,6 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     const port = url.port || (url.protocol === 'https:' ? '443' : '80');
     const prefix = url.pathname.replace(/\/$/, '');
     const params = new URLSearchParams({ token: target.tokens.access });
-    if (target.tokens.proxySession) params.set('session', target.tokens.proxySession);
     if (connId) params.set('connId', connId);
     return [`${wsProtocol}//${url.hostname}:${port}${prefix}${proxyPath}?${params.toString()}`];
   }
@@ -161,7 +171,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     try {
       await rebuildClient(target, epoch);
     } catch {
-      // markDown happened inside, ensureAlive retries from the current target
+      // parked or crashed, health() says why
     }
   }
 
@@ -232,7 +242,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
             notifyClient();
             break;
           case 'error':
-            handleErrorEvent(event as { data?: unknown });
+            handleErrorEvent(event);
             break;
         }
       }
@@ -241,39 +251,62 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     });
   }
 
-  function handleErrorEvent(event: { data?: unknown }): void {
-    const message = stringifyError(event.data);
+  // server -ERR statuses carry only `error`, older clients only `data`
+  function handleErrorEvent(event: { error?: unknown; data?: unknown }): void {
+    const payload = event.error ?? event.data;
+    const message = stringifyError(payload ?? 'server error');
     // per-subject permission violations don't kill the connection — marking
     // down would brick a healthy socket with no reconnect event to revive it
     if (message.toLowerCase().includes('permissions violation')) {
       logger?.warn(`permission violation (connection stays up): ${message}`);
       return;
     }
-    const cls = classifyClose(typeof event.data === 'object' && event.data !== null ? { ...(event.data as object), message } : message);
+    const cls = classifyClose(typeof payload === 'object' && payload !== null ? { ...(payload as object), message } : message);
     if (cls === 'auth-expired') {
       if (resolveServers) {
         resign(message);
         return;
       }
-      emitter.emit('auth-error', { message });
+      emitter.emit('auth-error', { message, access: dialAccess });
       return;
     }
     if (cls === 'forbidden') {
-      // refreshing cannot fix a 4403 — mark down without the auth-error that
-      // used to trigger a refresh loop
+      // every reconnect would be refused the same way
+      if (refusedByServer(payload)) {
+        park(message);
+        return;
+      }
       logger?.warn(`forbidden by server: ${message}`);
-      markDown(`forbidden: ${message}`);
+      markDown(forbiddenError(message));
       return;
     }
     markDown(message);
   }
 
+  function park(message: string): void {
+    parked = true;
+    const dropped = proxy;
+    if (dropped) {
+      stopStatusMonitor();
+      stopRefresh();
+      proxy = null;
+      try {
+        dropped.abortClose();
+      } catch {
+        // ignore
+      }
+    }
+    logger?.warn(`forbidden by server: ${message}`);
+    markDown(forbiddenError(message));
+    if (dropped) notifyClient();
+  }
+
   async function rebuildClient(target: ConnectionTarget, epoch: number): Promise<void> {
     logger?.debug(`rebuildClient start (epoch=${epoch})`);
-    const t0 = Date.now();
     stopStatusMonitor();
     stopRefresh();
-    pendingConnectAbort?.abort();
+    dialAbort?.abort();
+    parked = false;
     if (proxy) {
       try {
         proxy.abortClose();
@@ -281,95 +314,132 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
         // ignore — closing a half-dead client; nothing actionable
       }
       proxy = null;
+      markDown('endpoint-changed');
       notifyClient();
     }
 
-    // Fresh per-connection token BEFORE buildServers so the proxy URL and the
-    // client's reply subjects carry the same connId.
-    connId = newConnId();
-    let servers: string[];
+    const abort = new AbortController();
+    dialAbort = abort;
     try {
-      servers = await serversFor(target);
-    } catch (err) {
-      if (disposed || epoch !== applyEpoch) return;
-      const msg = stringifyError(err);
-      logger?.debug(`rebuildClient resolve FAILED: ${msg}`);
-      markDown(msg);
-      throw err;
-    }
-    if (disposed || epoch !== applyEpoch) return;
-    const next = createRPCClient({
-      servers,
-      name: clientName,
-      connId,
-      auth: { user: natsUser, password: natsPassword },
-      reconnect: true,
-      maxReconnectAttempts: -1,
-      reconnectTimeWait,
-      reconnectionDelayMax,
-      reconnectionRandomizationFactor,
-      timeout,
-      connectTimeout,
-      pingInterval,
-      pingTimeout,
-      maxPingOut,
-      ignoreAuthErrorAbort: true,
-    });
-
-    const connectAbort = new AbortController();
-    pendingConnectAbort = connectAbort;
-
-    try {
-      await next.connect({ signal: connectAbort.signal });
-    } catch (err) {
-      try {
-        next.abortClose();
-      } catch {
-        // ignore
+      for (let retry = 0; ; retry++) {
+        if (retry > 0) {
+          const wait = retryDelay(retry - 1);
+          logger?.debug(`rebuildClient retry in ${wait}ms`);
+          await sleep(wait, abort.signal);
+          if (disposed || epoch !== applyEpoch) return;
+        }
+        if (await dialOnce(target, epoch, abort.signal)) return;
       }
-      if (disposed || epoch !== applyEpoch) {
-        // Superseded while pending — a newer apply()/dispose() owns the
-        // state now; stay silent.
-        return;
-      }
-      const msg = err instanceof Error ? err.message : String(err);
-      logger?.debug(`rebuildClient connect FAILED after ${Date.now() - t0}ms: ${msg}`);
-      // a 4401 at connect means the URL token is stale — without this the dial
-      // loop retries the same dead token until the next rotation (resolved
-      // pools are rebuilt fresh by the next ensureAlive instead)
-      if (!resolveServers && classifyClose(err instanceof Error ? (err as CloseLike) : msg) === 'auth-expired') {
-        emitter.emit('auth-error', { message: msg });
-      }
-      markDown(msg);
-      throw err;
     } finally {
-      if (pendingConnectAbort === connectAbort) pendingConnectAbort = null;
+      if (dialAbort === abort) dialAbort = null;
     }
+  }
 
-    if (disposed || epoch !== applyEpoch) {
-      // The connect resolved late — after a newer apply(null)/apply(target)/
-      // dispose(). Installing it would hijack the newer state; discard it.
+  // true once connected or superseded, false asks for another attempt, a throw means parked or crashed
+  async function dialOnce(target: ConnectionTarget, epoch: number, signal: AbortSignal): Promise<boolean> {
+    const t0 = Date.now();
+    let settle!: () => void;
+    const attempt = { startedAt: t0, settled: new Promise<void>((resolve) => (settle = resolve)) };
+    dialAttempt = attempt;
+    try {
+      // before serversFor, the proxy URL and the reply subjects must carry the same connId
+      connId = newConnId();
+      let servers: string[];
       try {
-        next.abortClose();
-      } catch {
-        // ignore
+        servers = await serversFor(target);
+      } catch (err) {
+        if (disposed || epoch !== applyEpoch) return true;
+        const msg = stringifyError(err);
+        logger?.debug(`rebuildClient resolve FAILED: ${msg}`);
+        markDown(msg);
+        return false;
       }
-      return;
-    }
+      if (disposed || epoch !== applyEpoch) return true;
+      dialAccess = target.tokens.access;
+      const next = createRPCClient({
+        servers,
+        name: clientName,
+        connId,
+        auth: { user: natsUser, password: natsPassword },
+        reconnect: true,
+        maxReconnectAttempts: -1,
+        reconnectTimeWait,
+        reconnectionDelayMax,
+        reconnectionRandomizationFactor,
+        timeout,
+        connectTimeout,
+        pingInterval,
+        pingTimeout,
+        maxPingOut,
+        ignoreAuthErrorAbort: true,
+        // the library would retry a first dial about once a second and never surface its close code
+        waitOnFirstConnect: false,
+      });
 
-    proxy = next;
-    logger?.debug(`rebuildClient connected in ${Date.now() - t0}ms`);
-    // markUp BEFORE notifyClient — notifyClient gates on status.up, so we
-    // need the up-flag set before we tell listeners we have a live client.
-    markUp();
-    notifyClient();
-    startStatusMonitor(next);
-    startRefresh(next);
+      try {
+        await next.connect({ signal });
+      } catch (err) {
+        try {
+          next.abortClose();
+        } catch {
+          // ignore
+        }
+        if (disposed || epoch !== applyEpoch) {
+          // superseded, a newer apply or dispose owns the state
+          return true;
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        logger?.debug(`rebuildClient connect FAILED after ${Date.now() - t0}ms: ${msg}`);
+        const cls = classifyClose(err instanceof Error ? (err as CloseLike) : msg);
+        if (cls === 'forbidden') {
+          park(msg);
+          throw err;
+        }
+        // the URL token is dead, a resolver signs a fresh URL on the next attempt instead
+        if (cls === 'auth-expired' && !resolveServers) {
+          parked = true;
+          emitter.emit('auth-error', { message: msg, access: target.tokens.access });
+          markDown(msg);
+          throw err;
+        }
+        markDown(msg);
+        return false;
+      }
+
+      if (disposed || epoch !== applyEpoch) {
+        // resolved after a newer apply or dispose, installing it would hijack that state
+        try {
+          next.abortClose();
+        } catch {
+          // ignore
+        }
+        return true;
+      }
+
+      proxy = next;
+      logger?.debug(`rebuildClient connected in ${Date.now() - t0}ms`);
+      // markUp first, notifyClient gates on status.up
+      markUp();
+      notifyClient();
+      startStatusMonitor(next);
+      startRefresh(next);
+      return true;
+    } finally {
+      settle();
+      if (dialAttempt === attempt) dialAttempt = null;
+    }
+  }
+
+  function retryDelay(retry: number): number {
+    const base = reconnectionDelayMax > 0 ? Math.min(reconnectTimeWait * 2 ** retry, reconnectionDelayMax) : reconnectTimeWait;
+    const spread = base * reconnectionRandomizationFactor;
+    return Math.round(base - spread + Math.random() * 2 * spread);
   }
 
   async function apply(target: ConnectionTarget | null): Promise<void> {
     if (disposed) throw new Error('nats-transport disposed');
-    if (isSameTarget(currentTarget, target)) return;
+    // a crashed dial leaves nothing holding the target, the same target has to dial again
+    if (isSameTarget(currentTarget, target) && (!target || proxy || dialAbort || parked)) return;
 
     const epoch = ++applyEpoch;
     const endpointChanged = isEndpointChange(currentTarget, target);
@@ -378,8 +448,9 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     if (!target) {
       stopStatusMonitor();
       stopRefresh();
-      pendingConnectAbort?.abort();
-      pendingConnectAbort = null;
+      dialAbort?.abort();
+      dialAbort = null;
+      parked = false;
       if (proxy) {
         try {
           proxy.abortClose();
@@ -394,15 +465,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     }
 
     if (endpointChanged || !proxy) {
-      try {
-        await rebuildClient(target, epoch);
-      } catch (err) {
-        // Failed rebuild must not leave currentTarget pointing at a target
-        // we never connected to — the same-target dedupe (here and in
-        // transportSync) would otherwise swallow every retry.
-        if (epoch === applyEpoch && currentTarget === target) currentTarget = null;
-        throw err;
-      }
+      await rebuildClient(target, epoch);
       return;
     }
 
@@ -412,7 +475,14 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     // behaviour and avoids gratuitous disconnects on every refresh.
     const p = proxy;
     const newServers = await serversFor(target);
-    if (proxy === p && epoch === applyEpoch) p.setServers(newServers);
+    if (epoch !== applyEpoch) return;
+    if (proxy === p) {
+      p.setServers(newServers);
+      dialAccess = target.tokens.access;
+    } else if (parked) {
+      // refused while this token was being signed, it has not been tried yet
+      await rebuildClient(target, epoch);
+    }
   }
 
   function health(): TransportStatus {
@@ -420,7 +490,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     // throttled heartbeat timer fires. The client's wall-clock staleness check
     // surfaces the dead socket immediately, so callers acting on resume (the
     // kernel's nats-recovery, phase gating) don't trust a zombie.
-    if (status.up && proxy?.isStale) {
+    if (status.up && proxy?.isStale && Date.now() > probedUntil) {
       return { up: false, lastError: 'staleConnection' };
     }
     return status;
@@ -435,8 +505,8 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     applyEpoch++;
     stopStatusMonitor();
     stopRefresh();
-    pendingConnectAbort?.abort();
-    pendingConnectAbort = null;
+    dialAbort?.abort();
+    dialAbort = null;
     if (proxy) {
       try {
         proxy.abortClose();
@@ -468,6 +538,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     const t0 = Date.now();
     try {
       await proxy.flush(timeoutMs);
+      probedUntil = Date.now() + heartbeatWindow;
       logger?.debug(`probeAlive OK in ${Date.now() - t0}ms`);
     } catch (err) {
       logger?.debug(`probeAlive FAILED after ${Date.now() - t0}ms: ${err instanceof Error ? err.message : String(err)}`);
@@ -491,22 +562,26 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   function ensureAlive(): Promise<TransportStatus> {
     if (ensureInflight) return ensureInflight;
     const run = async (): Promise<TransportStatus> => {
-      if (disposed || !currentTarget) return health();
+      if (disposed || !currentTarget || parked) return health();
       if (!proxy) {
-        // no client and no dial loop — rebuild from the current target, the
-        // one state neither the lib nor the status iterator can recover from
-        const epoch = ++applyEpoch;
-        try {
-          await rebuildClient(currentTarget, epoch);
-        } catch {
-          // markDown happened inside rebuildClient
+        // a dial that just started is likely still good, after that a wake
+        // skips the backoff and dials fresh instead
+        const attempt = dialAttempt;
+        if (attempt && Date.now() - attempt.startedAt < DIAL_GRACE_MS) {
+          await attempt.settled;
+          return health();
         }
+        rebuildClient(currentTarget, ++applyEpoch).catch(() => {
+          // parked or crashed, health() says why
+        });
+        await dialAttempt?.settled;
         return health();
       }
-      if (health().up) {
+      // stale can be a heartbeat throttled in a hidden window while the socket still answers
+      if (status.up) {
         try {
           await probeAlive(3_000);
-          return health();
+          return status;
         } catch {
           // proved dead, fall through to the forced redial
         }
@@ -538,11 +613,31 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   };
 }
 
+function sleep(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) {
+      resolve();
+      return;
+    }
+    const timer = setTimeout(done, ms);
+    signal.addEventListener('abort', done, { once: true });
+    function done(): void {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', done);
+      resolve();
+    }
+  });
+}
+
+function forbiddenError(message: string): string {
+  return /^forbidden\b/.test(message) ? message : `forbidden: ${message}`;
+}
+
 function stringifyError(value: unknown): string {
   if (value instanceof Error) return value.message;
   if (typeof value === 'string') return value;
   try {
-    return JSON.stringify(value);
+    return JSON.stringify(value) ?? String(value);
   } catch {
     return String(value);
   }

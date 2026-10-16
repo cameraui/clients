@@ -1,5 +1,5 @@
 import type { Kernel } from '../core/kernel.js';
-import type { ConnectionTarget } from '../core/types.js';
+import type { ConnectionPhase, ConnectionTarget, Tokens } from '../core/types.js';
 
 export type Detach = () => void;
 
@@ -18,6 +18,7 @@ export interface PersistedTarget {
 
 export interface Persistence {
   readonly detach: Detach;
+  readonly ready: Promise<void>;
   peek(): ConnectionTarget | null;
   seed(target: ConnectionTarget): Promise<void>;
   absorb(target: ConnectionTarget | null): void;
@@ -31,26 +32,42 @@ export interface PersistenceOptions {
   readonly onPersist?: (target: ConnectionTarget) => void;
   readonly onClear?: () => void;
   readonly onError?: (op: 'get' | 'set' | 'del' | 'parse', err: unknown) => void;
+  readonly readyTimeoutMs?: number;
 }
 
 const DEFAULT_KEY = 'camera.ui:transport:target';
+const DEFAULT_READY_TIMEOUT_MS = 3_000;
 
 export function attachPersistence(options: PersistenceOptions): Persistence {
   const key = options.key ?? DEFAULT_KEY;
   const onError = options.onError ?? (() => {});
+  const readyTimeoutMs = options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS;
 
   let detached = false;
   let cached: ConnectionTarget | null = null;
+  let readyTimer: ReturnType<typeof setTimeout> | undefined;
+  let settleReady!: () => void;
 
-  restore();
+  const ready = new Promise<void>((resolve) => {
+    settleReady = () => {
+      clearTimeout(readyTimer);
+      resolve();
+    };
+  });
+  // probes wait on ready, a storage bridge whose read never settles must not hold them forever
+  if (readyTimeoutMs > 0 && Number.isFinite(readyTimeoutMs)) readyTimer = setTimeout(settleReady, readyTimeoutMs);
+  restore().then(settleReady, settleReady);
 
   async function restore(): Promise<void> {
-    let raw: string | null;
-    try {
-      raw = await options.storage.get(key);
-    } catch (err) {
-      onError('get', err);
-      raw = null;
+    let raw: string | null = null;
+    // a failed read reads as "no session" and sends the user to the login, so try once more
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        raw = await options.storage.get(key);
+        break;
+      } catch (err) {
+        onError('get', err);
+      }
     }
     if (detached) return;
     // Don't clobber the cache if an external seed() / persist() landed
@@ -107,10 +124,11 @@ export function attachPersistence(options: PersistenceOptions): Persistence {
 
   const unsub = options.kernel.subscribe((next, prev) => {
     if (detached) return;
-    // tokens rotated mid-probe: single-use refresh tokens make losing this
-    // write a forced logout on the next boot
-    if (next.kind === 'discovering' && next.pendingTokens && (prev.kind !== 'discovering' || prev.pendingTokens !== next.pendingTokens)) {
-      if (cached) persist({ endpoint: cached.endpoint, tokens: next.pendingTokens });
+    // tokens rotated mid-probe or after the drop: single-use refresh tokens
+    // make losing this write a forced logout on the next boot
+    const pending = pendingTokensOf(next);
+    if (pending && pending !== pendingTokensOf(prev)) {
+      if (cached) persist({ endpoint: cached.endpoint, tokens: pending });
       return;
     }
     const nextTarget = next.kind === 'online' ? next.target : null;
@@ -128,8 +146,10 @@ export function attachPersistence(options: PersistenceOptions): Persistence {
   return {
     detach: () => {
       detached = true;
+      settleReady();
       unsub();
     },
+    ready,
     peek: () => cached,
     seed: async (target) => {
       if (detached) return;
@@ -142,10 +162,20 @@ export function attachPersistence(options: PersistenceOptions): Persistence {
   };
 }
 
-export function localStorageAdapter(scope: Storage = globalThis.localStorage): StorageAdapter {
+function pendingTokensOf(phase: ConnectionPhase): Tokens | undefined {
+  return phase.kind === 'discovering' || phase.kind === 'offline' ? phase.pendingTokens : undefined;
+}
+
+export function localStorageAdapter(scope?: Storage): StorageAdapter {
   if (!scope) {
-    throw new Error('localStorageAdapter: localStorage is not available in this environment');
+    try {
+      // blocked site data throws on the bare property access
+      scope = globalThis.localStorage;
+    } catch {
+      // ignore
+    }
   }
+  if (!scope) return memoryStorageAdapter();
   return {
     get(k) {
       return scope.getItem(k);

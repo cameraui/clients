@@ -9,12 +9,12 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
 
     case 'BOOT': {
       if (phase.kind !== 'idle' && phase.kind !== 'offline' && phase.kind !== 'needs-auth') return phase;
-      return { kind: 'discovering', instanceId: action.instanceId };
+      return withPending({ kind: 'discovering', instanceId: action.instanceId }, phase);
     }
 
     case 'USER_RETRY': {
       if (phase.kind === 'offline' || phase.kind === 'needs-auth') {
-        return { kind: 'discovering', instanceId: phase.instanceId ?? '' };
+        return withPending({ kind: 'discovering', instanceId: phase.instanceId ?? '' }, phase);
       }
       return phase;
     }
@@ -59,7 +59,8 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
         if (tokensEqual(phase.target.tokens, action.tokens)) return phase;
         return { ...phase, target: { ...phase.target, tokens: action.tokens } };
       }
-      if (phase.kind === 'discovering') {
+      // a refresh that lands after the phase moved on still rotated the refresh token server-side
+      if (phase.kind === 'discovering' || phase.kind === 'offline') {
         if (phase.pendingTokens && tokensEqual(phase.pendingTokens, action.tokens)) return phase;
         return { ...phase, pendingTokens: action.tokens };
       }
@@ -104,7 +105,8 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
       if (phase.kind !== 'offline') return phase;
       const now = ctx.now();
       const candidate = now + action.retryAfterMs;
-      if (candidate <= phase.nextRetryAt) return phase;
+      // until a first hint lands nextRetryAt is only the flat default, backoff takes the later of hint and schedule
+      if (phase.backoffHint && candidate <= phase.nextRetryAt) return phase;
       return {
         ...phase,
         nextRetryAt: candidate,
@@ -116,6 +118,10 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
       };
     }
   }
+}
+
+function withPending(next: Extract<ConnectionPhase, { kind: 'discovering' }>, prev: ConnectionPhase): ConnectionPhase {
+  return prev.kind === 'offline' && prev.pendingTokens ? { ...next, pendingTokens: prev.pendingTokens } : next;
 }
 
 function tokensEqual(a: Tokens, b: Tokens): boolean {

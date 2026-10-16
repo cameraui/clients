@@ -15,6 +15,7 @@ const WS_CLOSE_TARGET_CHANGED = 4000;
 const WS_CLOSE_DETACHED = 4001;
 const WS_CLOSE_DISPOSED = 4002;
 const WS_CLOSE_RESOLVE_FAILED = 4003;
+const RESOLVE_TIMEOUT_MS = 10_000;
 
 export interface WsHandleSpec {
   readonly path: string;
@@ -64,7 +65,6 @@ export interface WsTransportOptions {
   readonly spec?: Partial<TransportSpec>;
   readonly webSocketCtor?: typeof WebSocket;
   readonly tokenParam?: string;
-  readonly sessionParam?: string;
   readonly logger?: Logger;
   readonly resolveUrl?: WsUrlResolver;
 }
@@ -79,14 +79,15 @@ interface InternalHandle {
   readonly listeners: { [E in WsEvent]: Set<WsEventHandler<E>> };
   ws: WebSocket | null;
   url: string | null;
+  access?: string;
   disposed: boolean;
   openSeq: number;
+  resolveTimer?: ReturnType<typeof setTimeout>;
 }
 
 export function createWsTransport(options: WsTransportOptions = {}): WsTransport {
   const spec: TransportSpec = { ...WS_SPEC, ...options.spec };
   const tokenParam = options.tokenParam ?? 'token';
-  const sessionParam = options.sessionParam ?? 'session';
   const WsCtor = options.webSocketCtor ?? (typeof WebSocket !== 'undefined' ? WebSocket : undefined);
   const resolveUrl = options.resolveUrl;
 
@@ -116,7 +117,6 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
       if (v !== undefined && v !== null && v !== '') params.set(k, v);
     }
     params.set(tokenParam, target.tokens.access);
-    if (target.tokens.proxySession) params.set(sessionParam, target.tokens.proxySession);
     return `${wsProtocol}//${base.hostname}:${port}${prefix}${handleSpec.path}?${params.toString()}`;
   }
 
@@ -148,7 +148,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
       if (!isCurrent) return;
       logger?.debug(`close ${handle.spec.path} code=${event.code} clean=${event.wasClean}${event.reason ? ` reason=${event.reason}` : ''}`);
       if (isAuthCloseEvent(event)) {
-        emitter.emit('auth-error', { message: event.reason || `ws close code ${event.code}` });
+        emitter.emit('auth-error', { message: event.reason || `ws close code ${event.code}`, access: handle.access });
       }
       const info: WsCloseInfo = { code: event.code, reason: event.reason, wasClean: event.wasClean };
       for (const fn of [...handle.listeners.close]) fn(info);
@@ -165,6 +165,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
 
   function closeWs(handle: InternalHandle, code: number, reason: string): void {
     handle.openSeq++;
+    clearResolveTimer(handle);
     const ws = handle.ws;
     if (!ws) return;
     const Ctor = ensureCtor();
@@ -190,12 +191,13 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
     for (const fn of [...handle.listeners.close]) fn(info);
   }
 
-  function connectWs(handle: InternalHandle, url: string): void {
+  function connectWs(handle: InternalHandle, url: string, access?: string): void {
     const Ctor = ensureCtor();
     const ws = new Ctor(url, handle.spec.protocols as string | string[] | undefined);
     if (handle.spec.binaryType) ws.binaryType = handle.spec.binaryType;
     handle.ws = ws;
     handle.url = url;
+    handle.access = access;
     bindWs(handle, ws);
   }
 
@@ -205,24 +207,49 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
     const target = currentTarget;
     const defaultUrl = buildUrl(target, handle.spec);
     if (!resolveUrl) {
-      connectWs(handle, defaultUrl);
+      connectWs(handle, defaultUrl, target.tokens.access);
       return;
     }
     // a close/recycle/dispose while resolving bumps openSeq, the late URL is dropped
     const seq = ++handle.openSeq;
+    clearResolveTimer(handle);
+    handle.resolveTimer = setTimeout(() => {
+      handle.resolveTimer = undefined;
+      if (handle.disposed || seq !== handle.openSeq) return;
+      handle.openSeq++;
+      logger?.warn(`resolveUrl timed out for ${handle.spec.path} after ${RESOLVE_TIMEOUT_MS}ms`);
+      failResolve(handle, 'resolve-timeout');
+    }, RESOLVE_TIMEOUT_MS);
     resolveUrl({ target, spec: handle.spec, defaultUrl }).then(
       (url) => {
-        if (handle.disposed || seq !== handle.openSeq || currentTarget !== target) return;
+        if (handle.disposed || seq !== handle.openSeq) return;
+        clearResolveTimer(handle);
+        // a token-only change does not recycle, so nothing else would reopen this handle
+        if (currentTarget !== target) {
+          openWs(handle);
+          return;
+        }
         connectWs(handle, url);
       },
       (err: unknown) => {
         if (handle.disposed || seq !== handle.openSeq) return;
+        clearResolveTimer(handle);
         const reason = err instanceof Error ? err.message : String(err);
         logger?.warn(`resolveUrl failed for ${handle.spec.path}: ${reason}`);
-        const info: WsCloseInfo = { code: WS_CLOSE_RESOLVE_FAILED, reason: 'resolve-failed', wasClean: false };
-        for (const fn of [...handle.listeners.close]) fn(info);
+        failResolve(handle, 'resolve-failed');
       },
     );
+  }
+
+  function failResolve(handle: InternalHandle, reason: 'resolve-failed' | 'resolve-timeout'): void {
+    const info: WsCloseInfo = { code: WS_CLOSE_RESOLVE_FAILED, reason, wasClean: false };
+    for (const fn of [...handle.listeners.close]) fn(info);
+  }
+
+  function clearResolveTimer(handle: InternalHandle): void {
+    if (handle.resolveTimer === undefined) return;
+    clearTimeout(handle.resolveTimer);
+    handle.resolveTimer = undefined;
   }
 
   function recycleAll(code: number, reason: string): void {

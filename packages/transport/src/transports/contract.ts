@@ -5,7 +5,14 @@ export type TransportEvent = 'up' | 'down' | 'auth-error';
 export type TransportEventPayload<E extends TransportEvent> = E extends 'down'
   ? { readonly reason: string }
   : E extends 'auth-error'
-    ? { readonly status?: number; readonly message?: string }
+    ? {
+        readonly status?: number;
+        readonly message?: string;
+        // the access token the server turned down, when the transport knows which one it sent
+        readonly access?: string;
+        // a listener that starts a token refresh hands it over, true when a new access token is coming
+        readonly holdFor?: (refresh: Promise<boolean>) => void;
+      }
     : void;
 
 export type TransportEventHandler<E extends TransportEvent> = (payload: TransportEventPayload<E>) => void;

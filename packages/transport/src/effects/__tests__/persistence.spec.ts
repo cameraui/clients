@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { createKernel } from '../../core/kernel.js';
-import { attachPersistence, memoryStorageAdapter } from '../persistence.js';
+import { attachPersistence, localStorageAdapter, memoryStorageAdapter } from '../persistence.js';
 
 import type { ConnectionPhase, ConnectionTarget, Endpoint, ReducerContext, Tokens } from '../../core/types.js';
 
@@ -162,6 +162,111 @@ describe('attachPersistence — async storage', () => {
     attachPersistence({ kernel, storage: asyncStorage, onRestore });
 
     await vi.waitFor(() => expect(onRestore).toHaveBeenCalledWith({ endpoint: LAN, tokens: TOKENS }));
+  });
+
+  it('ready settles once the restore read finished', async () => {
+    const stored = JSON.stringify({ endpoint: LAN, tokens: TOKENS, savedAt: 0, version: 1 });
+    const storage = {
+      get: () => new Promise<string>((resolve) => setTimeout(() => resolve(stored), 5)),
+      set: () => {},
+      del: () => {},
+    };
+    const kernel = createKernel({ context: makeCtx() });
+    const persistence = attachPersistence({ kernel, storage });
+
+    expect(persistence.peek()).toBeNull();
+    await persistence.ready;
+    expect(persistence.peek()).toEqual({ endpoint: LAN, tokens: TOKENS });
+  });
+
+  it('retries a failed read once', async () => {
+    const stored = JSON.stringify({ endpoint: LAN, tokens: TOKENS, savedAt: 0, version: 1 });
+    const get = vi.fn().mockRejectedValueOnce(new Error('keychain locked')).mockResolvedValueOnce(stored);
+    const onError = vi.fn();
+    const kernel = createKernel({ context: makeCtx() });
+    const persistence = attachPersistence({ kernel, storage: { get, set: () => {}, del: () => {} }, onError });
+
+    await persistence.ready;
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(onError).toHaveBeenCalledWith('get', expect.any(Error));
+    expect(persistence.peek()).toEqual({ endpoint: LAN, tokens: TOKENS });
+  });
+
+  it('ready settles without a session when the read keeps failing', async () => {
+    const get = vi.fn().mockRejectedValue(new Error('keychain locked'));
+    const onRestore = vi.fn();
+    const kernel = createKernel({ context: makeCtx() });
+    const persistence = attachPersistence({ kernel, storage: { get, set: () => {}, del: () => {} }, onRestore });
+
+    await persistence.ready;
+    expect(get).toHaveBeenCalledTimes(2);
+    expect(onRestore).toHaveBeenCalledWith(null);
+  });
+
+  it('ready settles after 3s when the read hangs, and a late read still restores', async () => {
+    vi.useFakeTimers();
+    try {
+      const stored = JSON.stringify({ endpoint: LAN, tokens: TOKENS, savedAt: 0, version: 1 });
+      const storage = {
+        get: () => new Promise<string>((resolve) => setTimeout(() => resolve(stored), 5_000)),
+        set: () => {},
+        del: () => {},
+      };
+      const kernel = createKernel({ context: makeCtx() });
+      const persistence = attachPersistence({ kernel, storage });
+      let settled = false;
+      void persistence.ready.then(() => (settled = true));
+
+      await vi.advanceTimersByTimeAsync(2_999);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toBe(true);
+      expect(persistence.peek()).toBeNull();
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(persistence.peek()).toEqual({ endpoint: LAN, tokens: TOKENS });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('detach settles a pending ready', async () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const persistence = attachPersistence({ kernel, storage: { get: () => new Promise<string>(() => {}), set: () => {}, del: () => {} } });
+    persistence.detach();
+    await expect(persistence.ready).resolves.toBeUndefined();
+  });
+});
+
+describe('localStorageAdapter', () => {
+  it('falls back to memory when localStorage access throws', async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('SecurityError: access denied');
+      },
+    });
+    try {
+      const storage = localStorageAdapter();
+      await storage.set('k', 'v');
+      expect(await storage.get('k')).toBe('v');
+    } finally {
+      if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
+      else delete (globalThis as { localStorage?: unknown }).localStorage;
+    }
+  });
+
+  it('uses the given storage', () => {
+    const items = new Map<string, string>();
+    const scope = {
+      getItem: (k: string) => items.get(k) ?? null,
+      setItem: (k: string, v: string) => void items.set(k, v),
+      removeItem: (k: string) => void items.delete(k),
+    } as unknown as Storage;
+    const storage = localStorageAdapter(scope);
+    storage.set('k', 'v');
+    expect(items.get('k')).toBe('v');
   });
 });
 
@@ -356,5 +461,40 @@ describe('attachPersistence — pendingTokens during discovering', () => {
     expect(parsed.endpoint.url).toBe('https://nvr.local');
     expect(persistence.peek()?.tokens.access).toBe('at-1');
     persistence.detach();
+  });
+});
+
+describe('attachPersistence: tokens refreshed while offline', () => {
+  it('persists them onto the cached endpoint', async () => {
+    const kernel = createKernel({ context: makeCtx(), initial: ONLINE_PHASE });
+    const storage = memoryStorageAdapter();
+    const persistence = attachPersistence({ kernel, storage, key: 'k' });
+    await persistence.seed(TARGET);
+
+    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'net', transient: true });
+    kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: { access: 'at-1', refresh: 'rt-1' } });
+    await flushMicrotasks();
+
+    const parsed = JSON.parse((await storage.get('k'))!);
+    expect(parsed.tokens.access).toBe('at-1');
+    expect(parsed.endpoint.url).toBe(LAN.url);
+    expect(persistence.peek()?.tokens.access).toBe('at-1');
+  });
+
+  it('does not write them again when the next round picks them up', async () => {
+    const kernel = createKernel({ context: makeCtx(), initial: ONLINE_PHASE });
+    const storage = memoryStorageAdapter();
+    const set = vi.spyOn(storage, 'set');
+    const persistence = attachPersistence({ kernel, storage, key: 'k' });
+    await persistence.seed(TARGET);
+    kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'net', transient: true });
+    kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: { access: 'at-1', refresh: 'rt-1' } });
+    set.mockClear();
+
+    kernel.dispatch({ type: 'USER_RETRY' });
+    await flushMicrotasks();
+
+    expect(kernel.phase.kind).toBe('discovering');
+    expect(set).not.toHaveBeenCalled();
   });
 });

@@ -159,4 +159,70 @@ describe('createConnectionSignal — first connect is not degraded', () => {
       vi.useRealTimers();
     }
   });
+
+  it('reads degraded with a first-connect reason when no channel came up within 15s', async () => {
+    vi.useFakeTimers();
+    try {
+      const kernel = createKernel({ context: makeCtx() });
+      const socketio = new FakeTransport({ spec: SPECS.get('socketio')! });
+      const nats = new FakeTransport({ spec: SPECS.get('nats')! });
+      const handle = createConnectionSignal({ kernel, transports: [socketio, nats] });
+      kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+      kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
+
+      await vi.advanceTimersByTimeAsync(14_900);
+      expect(handle.current.kind).toBe('connecting');
+      await vi.advanceTimersByTimeAsync(200);
+      expect(handle.current).toEqual({ kind: 'degraded', channels: ['socketio', 'nats'], reason: 'first-connect' });
+
+      await socketio.apply({ endpoint: LAN, tokens: TOKENS });
+      await nats.apply({ endpoint: LAN, tokens: TOKENS });
+      expect(handle.current.kind).toBe('online');
+      handle.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a channel that comes up in time stops the first-connect timer', async () => {
+    vi.useFakeTimers();
+    try {
+      const { kernel, socketio, nats, handle } = setup();
+      kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+      kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
+      await vi.advanceTimersByTimeAsync(5_000);
+      await socketio.apply({ endpoint: LAN, tokens: TOKENS });
+      await nats.apply({ endpoint: LAN, tokens: TOKENS });
+      expect(handle.current.kind).toBe('online');
+      expect(vi.getTimerCount()).toBe(0);
+      handle.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('restarts the first-connect timer on every entry into online and clears it on dispose', async () => {
+    vi.useFakeTimers();
+    try {
+      const { kernel, handle } = setup();
+      kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+      kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
+      await vi.advanceTimersByTimeAsync(10_000);
+      kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'unreachable' });
+      kernel.dispatch({ type: 'USER_RETRY' });
+      kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(handle.current.kind).toBe('connecting');
+      await vi.advanceTimersByTimeAsync(5_100);
+      expect(handle.current.kind).toBe('degraded');
+
+      kernel.dispatch({ type: 'RESET' });
+      kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+      kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
+      handle.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

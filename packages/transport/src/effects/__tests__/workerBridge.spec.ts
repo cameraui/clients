@@ -39,6 +39,10 @@ class FakeHost implements WorkerHost {
     this.listeners.delete(listener);
   }
 
+  get listenerCount(): number {
+    return this.listeners.size;
+  }
+
   /** Test helper — simulate the worker sending a message back. */
   deliver(msg: WorkerMessage): void {
     const event = new MessageEvent<WorkerMessage>('message', { data: msg });
@@ -220,6 +224,53 @@ describe('attachWorkerBridge', () => {
 
     bridge.syncHost(host);
     expect(onSyncHost).toHaveBeenCalledWith(2);
+  });
+
+  it('lets go of a host that left hosts() on the next broadcast', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const registry = new Set<FakeHost>();
+    const bridge = attachWorkerBridge({ kernel, hosts: () => registry, listenForResyncRequests: true });
+    const gone = new FakeHost();
+    const kept = new FakeHost();
+    registry.add(gone).add(kept);
+    bridge.syncHost(gone);
+    bridge.syncHost(kept);
+
+    registry.delete(gone);
+    kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
+
+    expect(gone.listenerCount).toBe(0);
+    expect(kept.listenerCount).toBe(1);
+    const sent = gone.sent.length;
+    gone.deliver({ type: 'kernel-sync-request' });
+    expect(gone.sent.length).toBe(sent);
+  });
+
+  it('lets go of a host that left hosts() on revalidate', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const registry = new Set<FakeHost>();
+    const bridge = attachWorkerBridge({ kernel, hosts: () => registry, listenForResyncRequests: true });
+    const gone = new FakeHost();
+    registry.add(gone);
+    bridge.syncHost(gone);
+
+    registry.delete(gone);
+    bridge.revalidateWorkers();
+
+    expect(gone.listenerCount).toBe(0);
+  });
+
+  it('forgetHost drops the listener right away, a later sync wires it again', () => {
+    const kernel = createKernel({ context: makeCtx() });
+    const host = new FakeHost();
+    const bridge = attachWorkerBridge({ kernel, hosts: () => [host], listenForResyncRequests: true });
+    bridge.syncHost(host);
+
+    bridge.forgetHost(host);
+    expect(host.listenerCount).toBe(0);
+
+    bridge.syncHost(host);
+    expect(host.listenerCount).toBe(1);
   });
 });
 

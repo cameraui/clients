@@ -43,13 +43,23 @@ export interface ProbeLoopOptions {
   readonly onProbeError?: (endpoint: Endpoint, err: unknown) => void;
   readonly onAllFailed?: (reason: string) => void;
   readonly lastTarget?: () => ConnectionTarget | null;
+  readonly ready?: () => Promise<unknown>;
 }
+
+const CANCELED_RERUN_MS = 200;
+const MAX_CANCELED_ROUNDS = 3;
 
 export function attachProbeLoop(options: ProbeLoopOptions): Detach {
   let masterAbort: AbortController | undefined;
   let detached = false;
+  let canceledRounds = 0;
+  let rerunTimer: ReturnType<typeof setTimeout> | undefined;
 
   function cancel(): void {
+    if (rerunTimer !== undefined) {
+      clearTimeout(rerunTimer);
+      rerunTimer = undefined;
+    }
     if (masterAbort) {
       masterAbort.abort();
       masterAbort = undefined;
@@ -61,6 +71,8 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
     cancel();
     const ctrl = new AbortController();
     masterAbort = ctrl;
+    const startPhase = options.kernel.phase;
+    const pendingAtStart = startPhase.kind === 'discovering' ? startPhase.pendingTokens : undefined;
 
     let pool: readonly Endpoint[];
     try {
@@ -84,6 +96,11 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
       return;
     }
 
+    if (options.ready) {
+      // an async storage may still be restoring the session the probe needs
+      await options.ready().catch(() => undefined);
+      if (ctrl.signal.aborted) return;
+    }
     const lastTokens = options.lastTarget?.()?.tokens;
 
     // Build candidates as a wrapper around `options.probe` that also fires
@@ -120,7 +137,7 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
     }));
 
     try {
-      const { endpoint, value: tokens } = await raceFirst(candidates, {
+      const { endpoint, value } = await raceFirst(candidates, {
         timeoutByMode: options.timeoutByMode,
         parentSignal: ctrl.signal,
         prefer: options.prefer,
@@ -136,6 +153,11 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
         informative: (cause) => !(isProbeFailure(cause) && cause.kind === 'aborted'),
       });
       if (ctrl.signal.aborted) return;
+      // a probe that only confirmed the round's tokens must not undo a refresh that landed during the round,
+      // one carried over from offline may predate a login seeded since
+      const phase = options.kernel.phase;
+      const refreshed = phase.kind === 'discovering' && phase.pendingTokens !== pendingAtStart ? phase.pendingTokens : undefined;
+      const tokens = value === lastTokens && refreshed ? refreshed : value;
       options.kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint, tokens });
     } catch (err) {
       if (ctrl.signal.aborted) return;
@@ -149,23 +171,32 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
       // unload) is NOT a real connection failure — re-run the round shortly
       // instead of flapping through `offline` and showing a disconnect banner
       // for a non-issue.
-      if (isProbeFailure(underlying) && underlying.kind === 'aborted') {
-        setTimeout(() => {
+      const allCanceled = isProbeFailure(underlying) && underlying.kind === 'aborted';
+      if (allCanceled && ++canceledRounds < MAX_CANCELED_ROUNDS) {
+        rerunTimer = setTimeout(() => {
+          rerunTimer = undefined;
           // Phase re-check: by the time this fires the kernel may have left
           // discovering (RESET) or a NEW round may already be running —
           // runRound() would cancel and restart that legitimate round.
           if (!detached && options.kernel.phase.kind === 'discovering') runRound();
-        }, 200);
+        }, CANCELED_RERUN_MS);
         return;
       }
-      const reason =
-        isProbeFailure(underlying) && underlying.kind === 'needs-auth' ? 'needs-auth' : underlying instanceof Error ? underlying.message : 'all endpoints failed';
+      // a cancel on every round is no navigation: Android WebViews cancel requests to hosts with an untrusted cert
+      const reason = allCanceled
+        ? `${underlying.message} (${canceledRounds} rounds, certificate blocked?)`
+        : isProbeFailure(underlying) && underlying.kind === 'needs-auth'
+          ? 'needs-auth'
+          : underlying instanceof Error
+            ? underlying.message
+            : 'all endpoints failed';
       options.onAllFailed?.(reason);
       options.kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: reason });
     }
   }
 
   const unsub = options.kernel.subscribe((next, prev) => {
+    if (next.kind !== prev.kind) canceledRounds = 0;
     if (next.kind === 'discovering' && prev.kind !== 'discovering') {
       runRound();
     } else if (next.kind !== 'discovering' && prev.kind === 'discovering') {

@@ -13,6 +13,8 @@ const HTTP_SPEC: TransportSpec = {
   phaseGating: false,
 };
 
+const TOKEN_REJECTED_MESSAGES = new Set(['Unauthorized', 'Token expired', 'Token revoked']);
+
 export type HttpAuthorizer = (config: InternalAxiosRequestConfig, target: ConnectionTarget) => void | Promise<void>;
 
 export interface HttpTransportOptions {
@@ -30,8 +32,10 @@ interface TargetWaiter {
   reject: (reason: unknown) => void;
 }
 
-interface AccessWaiter extends TargetWaiter {
+interface AccessWaiter {
   staleAccess: string;
+  resolve: (fresh: boolean) => void;
+  reject: (reason: unknown) => void;
 }
 
 interface AuthRetryConfig extends InternalAxiosRequestConfig {
@@ -96,14 +100,14 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
     for (const waiter of [...targetWaiters]) waiter.resolve();
   }
 
-  function waitForNewAccess(staleAccess: string, signal?: GenericAbortSignal): Promise<void> {
-    if (currentTarget && currentTarget.tokens.access !== staleAccess) return Promise.resolve();
-    return new Promise<void>((resolve, reject) => {
+  function waitForNewAccess(staleAccess: string, signal?: GenericAbortSignal, refresh?: Promise<boolean>): Promise<boolean> {
+    if (currentTarget && currentTarget.tokens.access !== staleAccess) return Promise.resolve(true);
+    return new Promise<boolean>((resolve, reject) => {
       const waiter: AccessWaiter = {
         staleAccess,
-        resolve: () => {
+        resolve: (fresh) => {
           cleanup();
-          resolve();
+          resolve(fresh);
         },
         reject: (reason) => {
           cleanup();
@@ -123,6 +127,9 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
       }
       signal?.addEventListener?.('abort', onAbort);
       accessWaiters.add(waiter);
+      refresh?.then((coming) => {
+        if (!coming) waiter.resolve(false);
+      });
     });
   }
 
@@ -131,7 +138,7 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
       if (!currentTarget) {
         waiter.reject(new axios.Cancel('http-transport: no target'));
       } else if (currentTarget.tokens.access !== waiter.staleAccess) {
-        waiter.resolve();
+        waiter.resolve(true);
       }
     }
   }
@@ -153,9 +160,6 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
     } else {
       config.headers.set('Authorization', `Bearer ${target.tokens.access}`);
     }
-    if (target.tokens.proxySession) {
-      config.headers.set('X-Proxy-Session', target.tokens.proxySession);
-    }
     return config;
   });
 
@@ -176,23 +180,46 @@ export function createHttpTransport(options: HttpTransportOptions = {}): HttpTra
       }
       if (error.response.status === 401) {
         logger?.debug(`auth-error 401 (${error.config?.url ?? 'unknown-url'})`);
-        emitter.emit('auth-error', { status: 401, message: extractMessage(error) });
-
+        const refreshes: Promise<boolean>[] = [];
         const config = error.config as AuthRetryConfig | undefined;
+        const message = extractMessage(error);
+        const tokenRejected = !options.authorize && message !== undefined && TOKEN_REJECTED_MESSAGES.has(message);
+        emitter.emit('auth-error', {
+          status: 401,
+          message,
+          access: tokenRejected ? config?._sentAccess : undefined,
+          holdFor: (refresh) => refreshes.push(refresh),
+        });
+
         if (config?._sentAccess && !config._authRetried && !disposed) {
           config._authRetried = true;
-          try {
-            await waitForNewAccess(config._sentAccess, config.signal);
-          } catch {
+          if (!(await shouldRetryAuth(config._sentAccess, refreshes, config.signal))) {
             return Promise.reject(error);
           }
-          logger?.debug(`retry after token refresh (${config.url ?? 'unknown-url'})`);
+          logger?.debug(`retry after 401 (${config.url ?? 'unknown-url'})`);
           return client(config);
         }
       }
       return Promise.reject(error);
     },
   );
+
+  async function shouldRetryAuth(sentAccess: string, refreshes: Promise<boolean>[], signal?: GenericAbortSignal): Promise<boolean> {
+    // without a refresh to follow, an authorize hook re-reads its credentials on the retry
+    if (refreshes.length === 0 && options.authorize) return true;
+    const refresh =
+      refreshes.length > 0
+        ? Promise.all(refreshes).then(
+            (results) => results.some(Boolean),
+            () => false,
+          )
+        : undefined;
+    try {
+      return (await waitForNewAccess(sentAccess, signal, refresh)) || Boolean(options.authorize);
+    } catch {
+      return false;
+    }
+  }
 
   function markDown(reason: string): void {
     if (status.up || status.lastError !== reason) {

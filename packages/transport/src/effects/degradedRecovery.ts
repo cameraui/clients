@@ -1,5 +1,5 @@
 import type { Kernel } from '../core/kernel.js';
-import type { ConnectionSignalHandle } from '../signal.js';
+import type { ConnectionSignal, ConnectionSignalHandle } from '../signal.js';
 import type { BackgroundProbeOutcome } from './backgroundProbe.js';
 
 export type Detach = () => void;
@@ -10,6 +10,7 @@ export interface DegradedRecoveryOptions {
   readonly ensureAll: () => void;
   readonly probe: () => Promise<BackgroundProbeOutcome>;
   readonly graceMs?: number;
+  readonly maxBackoffMs?: number;
   readonly isReachable?: () => boolean;
   readonly onEscalate?: (round: number) => void;
   readonly onOffline?: (reason: string) => void;
@@ -17,27 +18,46 @@ export interface DegradedRecoveryOptions {
 }
 
 const DEFAULT_GRACE_MS = 10_000;
+const DEFAULT_MAX_BACKOFF_MS = 300_000;
 
 export function attachDegradedRecovery(options: DegradedRecoveryOptions): Detach {
   const graceMs = options.graceMs ?? DEFAULT_GRACE_MS;
+  const maxBackoffMs = options.maxBackoffMs ?? DEFAULT_MAX_BACKOFF_MS;
   let timer: ReturnType<typeof setTimeout> | null = null;
   let round = 0;
+  // rounds in a row that ended with a channel up
+  let backoff = 0;
+  let channels = '';
   let detached = false;
 
-  function disarm(): void {
+  function clearTimer(): void {
     if (timer !== null) {
       clearTimeout(timer);
       timer = null;
     }
+  }
+
+  function disarm(): void {
+    clearTimer();
     round = 0;
+    backoff = 0;
+    channels = '';
   }
 
   function arm(): void {
     if (detached || timer !== null) return;
-    timer = setTimeout(() => {
-      timer = null;
-      escalate();
-    }, graceMs);
+    timer = setTimeout(
+      () => {
+        timer = null;
+        escalate();
+      },
+      Math.min(graceMs * 2 ** backoff, maxBackoffMs),
+    );
+  }
+
+  function rearm(): void {
+    backoff = options.isReachable?.() ? backoff + 1 : 0;
+    arm();
   }
 
   async function escalate(): Promise<void> {
@@ -54,7 +74,7 @@ export function attachDegradedRecovery(options: DegradedRecoveryOptions): Detach
       // connection. Hold, and let the still-down channel recover on its own
       if (options.isReachable?.()) {
         options.onHold?.('probe failed but a channel is up — holding');
-        arm();
+        rearm();
         return;
       }
       options.onOffline?.('degraded: endpoint unreachable');
@@ -63,14 +83,34 @@ export function attachDegradedRecovery(options: DegradedRecoveryOptions): Detach
     }
     // endpoint reachable (or swapped): the channels own their recovery,
     // check again after the next grace window
-    arm();
+    rearm();
+  }
+
+  function lostWanTarget(): boolean {
+    const phase = options.kernel.phase;
+    return phase.kind === 'online' && phase.target.endpoint.mode === 'direct-wan' && options.isReachable?.() === false;
+  }
+
+  function onDegraded(signal: Extract<ConnectionSignal, { kind: 'degraded' }>): void {
+    const next = signal.channels.join(',');
+    if (next !== channels) {
+      channels = next;
+      if (backoff > 0) {
+        backoff = 0;
+        clearTimer();
+      }
+    }
+    if (round === 0 && lostWanTarget()) {
+      disarm();
+      void escalate();
+    } else arm();
   }
 
   const unsub = options.signal.subscribe((next) => {
-    if (next.kind === 'degraded') arm();
+    if (next.kind === 'degraded') onDegraded(next);
     else disarm();
   });
-  if (options.signal.current.kind === 'degraded') arm();
+  if (options.signal.current.kind === 'degraded') onDegraded(options.signal.current);
 
   return () => {
     detached = true;
