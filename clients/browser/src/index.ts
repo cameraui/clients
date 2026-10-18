@@ -145,6 +145,7 @@ export type {
 
 export { createActivityMode, restartConnectedStreams, STREAM_CONFIG } from './streaming/index.js';
 export type {
+  ActiveStreamingMode,
   ActivityMode,
   ActivityModeConfig,
   CameraActivityMode,

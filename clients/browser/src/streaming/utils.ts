@@ -103,6 +103,10 @@ export function canPlayH265(transport: 'mse' | 'webrtc' | 'auto'): boolean {
   return webrtcH265;
 }
 
+export function canPlayMjpeg(): boolean {
+  return typeof createImageBitmap === 'function' && typeof HTMLCanvasElement === 'function' && typeof HTMLCanvasElement.prototype.captureStream === 'function';
+}
+
 export function reportH265DecodeFailure(transport: 'mse' | 'webrtc'): void {
   if (transport === 'mse') {
     mseH265 = false;

@@ -5,7 +5,7 @@ import { filterSupportedCodecs, getMediaSourceConstructor, getSupportedCodecs, h
 export type MSEErrorPhase = 'setup' | 'runtime';
 
 export interface MSEHandlerOptions {
-  videoElement: HTMLVideoElement;
+  videoElement: HTMLMediaElement;
   onReady: () => void;
   onFirstData: () => void;
   onError: (error: Error, phase: MSEErrorPhase) => void;
@@ -367,7 +367,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
   };
 }
 
-export function chaseLiveEdge(video: HTMLVideoElement): void {
+export function chaseLiveEdge(video: HTMLMediaElement): void {
   if (video.buffered.length > 0) {
     const end = video.buffered.end(video.buffered.length - 1);
     if (end - video.currentTime > 1) {
@@ -376,7 +376,7 @@ export function chaseLiveEdge(video: HTMLVideoElement): void {
   }
 }
 
-export async function playVideo(videoElement: HTMLVideoElement): Promise<void> {
+export async function playVideo(videoElement: HTMLMediaElement): Promise<void> {
   try {
     await videoElement.play();
   } catch {

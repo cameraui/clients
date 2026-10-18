@@ -5,15 +5,19 @@ import { STREAM_CONFIG } from '../config.js';
 import { StreamConnection } from '../streamConnection.js';
 import { reportH265DecodeFailure } from '../utils.js';
 import {
+  FakeCanvas,
+  FakeImageDecoder,
   FakeMediaSource,
   FakeMediaStream,
   FakePeerConnection,
   FakeVideo,
   FakeWsTransport,
+  fragment,
   H264_MIME,
   H265_MIME,
   initSegment,
   installMediaGlobals,
+  jpegFrame,
   restoreMediaGlobals,
   settle,
   videoFrame,
@@ -1509,6 +1513,181 @@ describe('StreamConnection probe', () => {
 
     expect(ws.handles[1].spec.query?.src).toBe('Garage_sub');
     expect(conn.hasBackchannel.value).toBe(false);
+    scope.stop();
+  });
+});
+
+describe('StreamConnection MJPEG', () => {
+  const JPEG_SOURCE = { _id: 'main', name: 'main', role: 'high-resolution', videoCodec: 'JPEG' } as CameraSource;
+  const JPEG_PROBE = { video: [{ direction: 'sendonly', codec: 'JPEG' }], audio: [] } as unknown as ProbeStream;
+  const JPEG_PCMA_PROBE = {
+    video: [{ direction: 'sendonly', codec: 'JPEG' }],
+    audio: [{ direction: 'sendonly', codec: 'PCMA' }],
+  } as unknown as ProbeStream;
+  const AAC_MIME = 'video/mp4; codecs="mp4a.40.2"';
+  const AUDIO_TRACK = { id: 1, kind: 'audio', timescale: 48_000 } as const;
+
+  let canvases: FakeCanvas[];
+  let audios: FakeVideo[];
+  let decoder: FakeImageDecoder;
+
+  beforeEach(() => {
+    canvases = [];
+    audios = [];
+    decoder = new FakeImageDecoder();
+    vi.stubGlobal('HTMLCanvasElement', FakeCanvas);
+    vi.stubGlobal('createImageBitmap', decoder.createImageBitmap);
+    vi.stubGlobal('document', {
+      createElement: (tag: string) => {
+        if (tag === 'canvas') {
+          canvases.push(new FakeCanvas());
+          return canvases.at(-1);
+        }
+        audios.push(new FakeVideo());
+        return audios.at(-1);
+      },
+    });
+  });
+
+  async function openMjpeg(handle: FakeWsHandle): Promise<void> {
+    handle.serverOpen();
+    await settle();
+    handle.serverText({ type: 'mjpeg' });
+  }
+
+  it.each(['auto', 'webrtc', 'mse'] as const)('plays a JPEG source as MJPEG in %s mode', async (mode) => {
+    const { conn, ws, video, scope } = setup({ mode, sources: [JPEG_SOURCE], probe: JPEG_PROBE });
+    await conn.start();
+    const handle = ws.handles[0];
+
+    await openMjpeg(handle);
+    handle.serverBinary(jpegFrame(1));
+    await settle();
+    video.presentFrame();
+
+    expect(handle.sentMessages()).toEqual([{ type: 'mjpeg' }]);
+    expect(FakePeerConnection.instances).toHaveLength(0);
+    expect(video.srcObject).toBe(canvases[0].stream);
+    expect(canvases[0].drawn).toEqual([1]);
+    expect([canvases[0].width, canvases[0].height]).toEqual([640, 480]);
+    expect(conn.activeMode.value).toBe('mjpeg');
+    expect(conn.status.value).toBe('connected');
+    expect(conn.isPlaying.value).toBe(true);
+    scope.stop();
+  });
+
+  it('goes by the probe when the source has no codec yet', async () => {
+    const { conn, ws, scope } = setup({ mode: 'auto', sources: [{ ...JPEG_SOURCE, videoCodec: undefined } as CameraSource], probe: JPEG_PROBE });
+    await conn.start();
+
+    await openMjpeg(ws.handles[0]);
+
+    expect(ws.handles[0].sentMessages()).toEqual([{ type: 'mjpeg' }]);
+    scope.stop();
+  });
+
+  it('draws only the newest of the frames that arrived during a decode', async () => {
+    const { conn, ws, scope } = setup({ sources: [JPEG_SOURCE], probe: JPEG_PROBE });
+    await conn.start();
+    const handle = ws.handles[0];
+    await openMjpeg(handle);
+
+    decoder.hold();
+    for (const id of [1, 2, 3, 4]) handle.serverBinary(jpegFrame(id));
+    await settle();
+    decoder.release();
+    await settle();
+
+    expect(canvases[0].drawn).toEqual([1, 4]);
+    expect(decoder.calls).toBe(2);
+    scope.stop();
+  });
+
+  it('plays the sound over MSE next to the picture and asks for audio codecs only', async () => {
+    const { conn, ws, scope } = setup({ sources: [JPEG_SOURCE], probe: JPEG_PCMA_PROBE });
+    await conn.start();
+    const handle = ws.handles[0];
+    await openMjpeg(handle);
+
+    handle.serverText({ type: 'mse', value: AAC_MIME });
+    handle.serverBinary(initSegment([AUDIO_TRACK]));
+    handle.serverBinary(jpegFrame(1));
+    handle.serverBinary(fragment({ dts: 0, trackId: 1, kind: 'audio', timescale: 48_000, samples: [{ duration: 1024, key: true }] }));
+    await settle();
+
+    expect(handle.sentMessages()).toEqual([{ type: 'mjpeg' }, { type: 'mse', value: 'mp4a.40.2,mp4a.40.5,flac,opus' }]);
+    expect(canvases[0].drawn).toEqual([1]);
+    expect(audios[0].sourceBuffer?.appendCalls).toBe(2);
+    expect(audios[0].paused).toBe(false);
+    expect(audios[0].muted).toBe(true);
+
+    conn.setMuted(false);
+    expect(audios[0].muted).toBe(false);
+    conn.pause();
+    expect(audios[0].paused).toBe(true);
+    scope.stop();
+  });
+
+  it('keeps the picture when go2rtc refuses the sound', async () => {
+    const { conn, ws, video, scope } = setup({ sources: [JPEG_SOURCE], probe: JPEG_PCMA_PROBE });
+    await conn.start();
+    const handle = ws.handles[0];
+    await openMjpeg(handle);
+
+    handle.serverText({ type: 'error', value: 'mse: streams: codecs not matched' });
+    handle.serverBinary(jpegFrame(1));
+    await settle();
+    video.presentFrame();
+
+    expect(audios[0].src).toBe('');
+    expect(handle.sentMessages()).not.toContainEqual({ type: 'mse/stop' });
+    expect(handle.disposed).toBe(false);
+    expect(canvases[0].drawn).toEqual([1]);
+    expect(conn.isPlaying.value).toBe(true);
+    scope.stop();
+  });
+
+  it('reconnects an MJPEG stream whose frames stopped', async () => {
+    const { conn, ws, video, scope } = setup({ sources: [JPEG_SOURCE], probe: JPEG_PROBE });
+    await conn.start();
+    const handle = ws.handles[0];
+    await openMjpeg(handle);
+    handle.serverBinary(jpegFrame(1));
+    await settle();
+    video.presentFrame();
+
+    for (let i = 2; i < 6; i++) {
+      handle.serverBinary(jpegFrame(i));
+      await vi.advanceTimersByTimeAsync(1000);
+    }
+    expect(conn.stalled.value).toBe(false);
+
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(handle.disposed).toBe(true);
+    expect(canvases[0].track.readyState).toBe('ended');
+    await expectNextSocketAt(ws, 1000);
+    scope.stop();
+  });
+
+  it('retries a stream whose first MJPEG frame never shows instead of falling back to MSE', async () => {
+    const { conn, ws, scope } = setup({ mode: 'auto', sources: [JPEG_SOURCE], probe: JPEG_PROBE });
+    await conn.start();
+    await openMjpeg(ws.handles[0]);
+
+    await vi.advanceTimersByTimeAsync(STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT);
+
+    expect(ws.handles[0].disposed).toBe(true);
+    expect(ws.handles[0].sentMessages()).toEqual([{ type: 'mjpeg' }]);
+    scope.stop();
+  });
+
+  it('reports a JPEG source as unsupported where the browser cannot draw it into a stream', async () => {
+    vi.stubGlobal('HTMLCanvasElement', undefined);
+    const { conn, ws, scope } = setup({ sources: [JPEG_SOURCE], probe: JPEG_PROBE });
+    await conn.start();
+
+    expect(conn.status.value).toBe('unsupported');
+    expect(ws.handles).toHaveLength(0);
     scope.stop();
   });
 });

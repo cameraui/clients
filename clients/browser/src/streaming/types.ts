@@ -4,13 +4,15 @@ import type { ReactiveCameraDevice } from '../types.js';
 
 export type VideoStreamingMode = 'webrtc' | 'webrtc/tcp' | 'mse' | 'auto';
 
+export type ActiveStreamingMode = Exclude<VideoStreamingMode, 'auto'> | 'mjpeg';
+
 export type StreamStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'error' | 'unsupported' | 'closed';
 
 export type StreamDegradeReason = 'codec';
 
 export interface StreamState {
   status: StreamStatus;
-  activeMode: Exclude<VideoStreamingMode, 'auto'>;
+  activeMode: ActiveStreamingMode;
   requestedMode: VideoStreamingMode;
   activeResolution: StreamingRole;
   requestedResolution: StreamingRole;
@@ -24,7 +26,7 @@ export interface StreamState {
 
 export interface ReactiveStream {
   readonly status: Ref<StreamStatus>;
-  readonly activeMode: Ref<Exclude<VideoStreamingMode, 'auto'>>;
+  readonly activeMode: Ref<ActiveStreamingMode>;
   readonly requestedMode: Ref<VideoStreamingMode>;
   readonly activeResolution: Ref<StreamingRole>;
   readonly requestedResolution: Ref<StreamingRole>;
@@ -67,12 +69,16 @@ export interface StreamOptions {
 }
 
 export interface Go2RTCMessageBase {
-  type: 'mse' | 'webrtc/candidate' | 'webrtc/answer' | 'webrtc/offer' | 'error';
+  type: 'mse' | 'mjpeg' | 'webrtc/candidate' | 'webrtc/answer' | 'webrtc/offer' | 'error';
 }
 
 export interface MSEMessage extends Go2RTCMessageBase {
   type: 'mse';
   value: string | ArrayBuffer;
+}
+
+export interface MJPEGMessage extends Go2RTCMessageBase {
+  type: 'mjpeg';
 }
 
 export interface WebRTCAnswerMessage extends Go2RTCMessageBase {
@@ -97,9 +103,9 @@ export interface ErrorMessage extends Go2RTCMessageBase {
   value: string;
 }
 
-export type Go2RTCMessage = MSEMessage | WebRTCMessage | ErrorMessage;
+export type Go2RTCMessage = MSEMessage | MJPEGMessage | WebRTCMessage | ErrorMessage;
 
-export type Go2RTCWsMessage = WebRTCOfferMessage | WebRTCCandidateMessage | MSEMessage;
+export type Go2RTCWsMessage = WebRTCOfferMessage | WebRTCCandidateMessage | MSEMessage | MJPEGMessage;
 
 export interface CodecCompatibility {
   compatible: boolean;

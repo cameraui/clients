@@ -571,6 +571,7 @@ export class FakeWsTransport {
 export interface FakeTrack {
   kind: 'video' | 'audio';
   readyState: 'live' | 'ended';
+  stop?: () => void;
 }
 
 export class FakeMediaStream {
@@ -590,6 +591,67 @@ export class FakeMediaStream {
 
   getAudioTracks(): FakeTrack[] {
     return this.trackList.filter((t) => t.kind === 'audio');
+  }
+}
+
+// SOI, frame id, size, EOI: enough for FakeImageDecoder to tell frames apart
+export function jpegFrame(id: number, width = 640, height = 480): ArrayBuffer {
+  const bytes = new Uint8Array(10);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(0, 0xffd8);
+  view.setUint16(2, id);
+  view.setUint16(4, width);
+  view.setUint16(6, height);
+  view.setUint16(8, 0xffd9);
+  return bytes.buffer;
+}
+
+export class FakeCanvas {
+  width = 300;
+  height = 150;
+  drawn: number[] = [];
+
+  readonly track: FakeTrack = {
+    kind: 'video',
+    readyState: 'live',
+    stop: () => {
+      this.track.readyState = 'ended';
+    },
+  };
+
+  readonly stream = new FakeMediaStream([this.track]);
+
+  getContext(): { drawImage: (bitmap: { id: number }) => void } {
+    return { drawImage: (bitmap) => this.drawn.push(bitmap.id) };
+  }
+
+  captureStream(): FakeMediaStream {
+    return this.stream;
+  }
+}
+
+// a held decoder keeps its frame until release(), the frames behind it queue up in the handler
+export class FakeImageDecoder {
+  calls = 0;
+
+  private waiting: (() => void)[] = [];
+  private held = false;
+
+  readonly createImageBitmap = vi.fn(async (blob: Blob) => {
+    this.calls++;
+    const view = new DataView(await blob.arrayBuffer());
+    const bitmap = { id: view.getUint16(2), width: view.getUint16(4), height: view.getUint16(6), close: vi.fn() };
+    if (this.held) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    return bitmap;
+  });
+
+  hold(): void {
+    this.held = true;
+  }
+
+  release(): void {
+    this.held = false;
+    for (const resolve of this.waiting.splice(0)) resolve();
   }
 }
 

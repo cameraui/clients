@@ -8,8 +8,9 @@ import { useCameraUi } from '../composables/useCameraUi.js';
 import { DEFAULT_TAB_PAUSE_MS, useTabVisibility } from '../composables/useTabVisibility.js';
 import { createSourceName } from '../server/index.js';
 import { STREAM_CONFIG } from './config.js';
+import { createMJPEGHandler, isJpegFrame } from './mjpeg.js';
 import { chaseLiveEdge, createMSEHandler, playVideo } from './mse.js';
-import { abortableSleep, canPlayH265, checkWebRTCCompatibility, isVideoInPictureInPicture, reportH265DecodeFailure, suspendsWhenHidden } from './utils.js';
+import { abortableSleep, canPlayH265, canPlayMjpeg, checkWebRTCCompatibility, isVideoInPictureInPicture, reportH265DecodeFailure, suspendsWhenHidden } from './utils.js';
 import { createBackchannelHandler, createWebRTCHandler, processWebRTCMessage } from './webrtc.js';
 
 import type { CameraSource, ProbeStream, StreamingRole } from '@camera.ui/sdk';
@@ -17,8 +18,9 @@ import type { ConnectionTarget } from '@camera.ui/transport';
 import type { WsCloseInfo, WsHandle, WsTransport } from '@camera.ui/transport/transports/ws';
 import type { ComputedRef, MaybeRefOrGetter, Ref, ShallowRef } from 'vue';
 import type { ReactiveCameraDevice } from '../types.js';
+import type { MJPEGHandler } from './mjpeg.js';
 import type { MSEErrorPhase, MSEHandler } from './mse.js';
-import type { Go2RTCMessage, ReactiveStream, StreamDegradeReason, StreamStatus, VideoStreamingMode } from './types.js';
+import type { ActiveStreamingMode, Go2RTCMessage, ReactiveStream, StreamDegradeReason, StreamStatus, VideoStreamingMode } from './types.js';
 import type { BackchannelHandler, WebRTCHandler } from './webrtc.js';
 
 export interface StreamConnectionOptions {
@@ -64,7 +66,7 @@ function withJitter(delayMs: number): number {
 
 export class StreamConnection implements ReactiveStream {
   public readonly status: Ref<StreamStatus>;
-  public readonly activeMode: Ref<Exclude<VideoStreamingMode, 'auto'>>;
+  public readonly activeMode: Ref<ActiveStreamingMode>;
   public readonly requestedMode: Ref<VideoStreamingMode>;
   public readonly activeResolution: Ref<StreamingRole>;
   public readonly requestedResolution: Ref<StreamingRole>;
@@ -106,6 +108,9 @@ export class StreamConnection implements ReactiveStream {
   private wsOpenedAt = 0;
   private webrtcHandler: WebRTCHandler | undefined;
   private mseHandler: MSEHandler | undefined;
+  private mjpegHandler: MJPEGHandler | undefined;
+  private audioHandler: MSEHandler | undefined;
+  private audioElement: HTMLAudioElement | undefined;
   private cancelFirstFrameWatch: (() => void) | undefined;
   private awaitingWebRTCFrame = false;
   private backchannelHandler: BackchannelHandler | undefined;
@@ -153,7 +158,7 @@ export class StreamConnection implements ReactiveStream {
     const { autoStart = true } = options;
 
     this.status = ref<StreamStatus>('idle');
-    this.activeMode = ref<Exclude<VideoStreamingMode, 'auto'>>('webrtc');
+    this.activeMode = ref<ActiveStreamingMode>('webrtc');
     this.activeResolution = ref<StreamingRole>('low-resolution');
     this.degradedFrom = ref<StreamingRole | null>(null);
     this.degradeReason = ref<StreamDegradeReason | null>(null);
@@ -209,7 +214,11 @@ export class StreamConnection implements ReactiveStream {
             } else {
               this.retryAfterNoMedia();
             }
-          } else if ((this.webrtcHandler && this.awaitingWebRTCFrame) || (this.status.value === 'connected' && !this.isPlaying.value)) {
+          } else if (
+            (this.webrtcHandler && this.awaitingWebRTCFrame) ||
+            (this.mjpegHandler && !this.isPlaying.value) ||
+            (this.status.value === 'connected' && !this.isPlaying.value)
+          ) {
             // a hidden page may not decode at all, judge the first frame once it can be seen
             if (isPageHidden()) {
               this.startConnectTimeout();
@@ -485,6 +494,7 @@ export class StreamConnection implements ReactiveStream {
     this.muted.value = muted;
     const video = this.videoElement.value;
     if (video) video.muted = muted;
+    if (this.audioElement) this.audioElement.muted = muted;
   }
 
   public async play(): Promise<void> {
@@ -504,12 +514,19 @@ export class StreamConnection implements ReactiveStream {
         }
       }
     }
+
+    const audio = this.audioElement;
+    if (audio) {
+      audio.muted = this.muted.value;
+      audio.play().catch(() => {});
+    }
   }
 
   public pause(): void {
     this.paused.value = true;
     const video = this.videoElement.value;
     if (video) video.pause();
+    this.audioElement?.pause();
   }
 
   public destroy(): void {
@@ -788,6 +805,7 @@ export class StreamConnection implements ReactiveStream {
 
   private isSourcePlayable(source: CameraSource): boolean {
     if (this.triedSourceIds.has(source._id)) return false;
+    if (source.videoCodec === 'JPEG') return canPlayMjpeg();
     if (source.videoCodec !== 'H265') return true;
 
     const mode = this.requestedMode.value;
@@ -862,6 +880,7 @@ export class StreamConnection implements ReactiveStream {
   private probeSaysUnplayable(probe: ProbeStream): boolean {
     const video = probe.video.filter((v) => v.direction === 'sendonly');
     if (!video.length) return false;
+    if (video.every((v) => v.codec === 'JPEG')) return !canPlayMjpeg();
     if (!video.every((v) => v.codec === 'H265')) return false;
     const mode = this.requestedMode.value;
     return !canPlayH265(mode === 'auto' ? 'auto' : mode === 'mse' ? 'mse' : 'webrtc');
@@ -891,7 +910,7 @@ export class StreamConnection implements ReactiveStream {
       reportH265DecodeFailure(this.activeMode.value === 'mse' ? 'mse' : 'webrtc');
     }
 
-    if (this.requestedMode.value === 'auto' && this.activeMode.value !== 'mse' && !this.mseRejected) {
+    if (this.requestedMode.value === 'auto' && this.activeMode.value !== 'mse' && !this.mjpegHandler && !this.mseRejected) {
       this.webrtcHandler?.close();
       this.webrtcHandler = undefined;
       this.awaitingWebRTCFrame = false;
@@ -1042,6 +1061,12 @@ export class StreamConnection implements ReactiveStream {
   }
 
   private requestStream(): void {
+    // go2rtc has no WebRTC or MSE consumer for JPEG
+    if (this.sourceIsMjpeg()) {
+      this.startMjpeg();
+      return;
+    }
+
     const mode = this.requestedMode.value;
 
     if (mode === 'auto') {
@@ -1096,8 +1121,10 @@ export class StreamConnection implements ReactiveStream {
         return;
       }
       this.handleMessage(msg);
-    } else if (this.mseHandler) {
-      this.mseHandler.appendBuffer(ev.data);
+    } else if (this.mjpegHandler && isJpegFrame(ev.data)) {
+      this.mjpegHandler.appendFrame(ev.data);
+    } else {
+      (this.mseHandler ?? this.audioHandler)?.appendBuffer(ev.data);
     }
   }
 
@@ -1120,10 +1147,16 @@ export class StreamConnection implements ReactiveStream {
           this.mseStopPending = false;
           this.sendWsMessage({ type: 'mse/stop' });
         }
-        if (this.mseHandler && typeof msg.value === 'string') {
+        if (typeof msg.value === 'string') {
+          const handler = this.mseHandler ?? this.audioHandler;
+          if (!handler) break;
           this.noteDeliveredAudio(MSE_AUDIO_CODEC.test(msg.value));
-          this.mseHandler.initializeBuffer(msg.value);
+          handler.initializeBuffer(msg.value);
         }
+        break;
+
+      case 'mjpeg':
+        if (this.mjpegHandler) this.status.value = 'connected';
         break;
 
       case 'error':
@@ -1155,9 +1188,19 @@ export class StreamConnection implements ReactiveStream {
       return;
     }
 
+    if (request === 'mjpeg') {
+      if (this.mjpegHandler) this.retryLater(err);
+      return;
+    }
+
     if (request === 'mse') {
       this.mseAnswerPending = false;
       this.mseStopPending = false;
+      // the picture of an MJPEG stream goes on without its sound
+      if (this.audioHandler) {
+        this.closeAudio();
+        return;
+      }
       if (!this.mseHandler) return;
       this.lastError = err;
       this.mseRejected = true;
@@ -1406,6 +1449,84 @@ export class StreamConnection implements ReactiveStream {
     this.startMSE();
   }
 
+  private sourceIsMjpeg(): boolean {
+    const video = this.probeInfo.value?.video.filter((v) => v.direction === 'sendonly') ?? [];
+    if (video.length) return video.every((v) => v.codec === 'JPEG');
+    return this.source.value?.videoCodec === 'JPEG';
+  }
+
+  private startMjpeg(): void {
+    const video = this.videoElement.value;
+    if (this.abortController.signal.aborted || !video) return;
+
+    const handler = createMJPEGHandler({ signal: this.abortController.signal });
+    this.mjpegHandler = handler;
+    this.activeMode.value = 'mjpeg';
+    this.lastMediaStream = handler.stream;
+
+    video.srcObject = handler.stream;
+    playVideo(video);
+    this.sendWsMessage({ type: 'mjpeg' });
+    this.startConnectTimeout();
+    this.watchFirstFrame(video);
+
+    if (this.hasAudio.value) this.startAudio();
+  }
+
+  private startAudio(): void {
+    if (this.audioHandler || this.abortController.signal.aborted) return;
+
+    const audio = document.createElement('audio');
+    audio.muted = this.muted.value;
+    const handler = createMSEHandler({
+      videoElement: audio,
+      signal: this.abortController.signal,
+      onReady: () => {},
+      onFirstData: () => playVideo(audio),
+      onError: (err) => {
+        log.debug('MJPEG audio error:', err);
+        this.dropAudio();
+      },
+    });
+
+    const codecs = handler
+      .setup()
+      ?.split(',')
+      .filter((codec) => MSE_AUDIO_CODEC.test(codec))
+      .join(',');
+    if (!codecs) {
+      handler.close();
+      return;
+    }
+
+    this.audioElement = audio;
+    this.audioHandler = handler;
+    this.sendWsMessage({ type: 'mse', value: codecs });
+    this.mseAnswerPending = true;
+  }
+
+  private dropAudio(): void {
+    if (!this.audioHandler) return;
+    this.closeAudio();
+    if (this.mseAnswerPending) {
+      this.mseStopPending = true;
+    } else {
+      this.sendWsMessage({ type: 'mse/stop' });
+    }
+  }
+
+  private closeAudio(): void {
+    this.audioHandler?.close();
+    this.audioHandler = undefined;
+
+    const audio = this.audioElement;
+    if (!audio) return;
+    this.audioElement = undefined;
+    audio.pause();
+    audio.removeAttribute('src');
+    audio.load();
+  }
+
   private handleFirstFrame(): void {
     if (this.abortController.signal.aborted) return;
 
@@ -1460,7 +1581,7 @@ export class StreamConnection implements ReactiveStream {
   private resetHealthBaseline(video: HTMLVideoElement): void {
     this.lastProgressAt = performance.now();
     this.lastMediaTime = video.currentTime;
-    this.lastFrameCount = decodedFrames(video);
+    this.lastFrameCount = this.frameCount(video);
     this.frameCounterLive = false;
     this.stalled.value = false;
   }
@@ -1470,10 +1591,11 @@ export class StreamConnection implements ReactiveStream {
     if (!video) return;
 
     const mse = this.activeMode.value === 'mse';
-    const frames = decodedFrames(video);
+    const frames = this.frameCount(video);
     if (frames !== undefined && frames > 0) this.frameCounterLive = true;
     const progressed = frames !== this.lastFrameCount || (mse && video.currentTime !== this.lastMediaTime);
     if (mse) chaseLiveEdge(video);
+    if (this.audioElement) chaseLiveEdge(this.audioElement);
     this.lastMediaTime = video.currentTime;
     this.lastFrameCount = frames;
 
@@ -1491,6 +1613,10 @@ export class StreamConnection implements ReactiveStream {
     } else if (silentFor >= STALL_AFTER) {
       this.stalled.value = true;
     }
+  }
+
+  private frameCount(video: HTMLVideoElement): number | undefined {
+    return this.mjpegHandler ? this.mjpegHandler.frames : decodedFrames(video);
   }
 
   private expectsFrames(video: HTMLVideoElement): boolean {
@@ -1517,6 +1643,10 @@ export class StreamConnection implements ReactiveStream {
 
     this.mseHandler?.close();
     this.mseHandler = undefined;
+
+    this.mjpegHandler?.close();
+    this.mjpegHandler = undefined;
+    this.closeAudio();
 
     this.closeBackchannel();
 
