@@ -1054,7 +1054,7 @@ export class StreamConnection implements ReactiveStream {
 
     // WebRTC or MSE and the talk path follow the probe
     const handle = this.wsHandle;
-    void (this.probing ?? Promise.resolve(undefined)).then(() => {
+    (this.probing ?? Promise.resolve(undefined)).then(() => {
       if (this.abortController.signal.aborted || this.wsHandle !== handle) return;
       this.requestStream();
     });
