@@ -12,6 +12,7 @@ export default defineConfig({
     vue(),
     dts({
       entryRoot: resolve(__dirname, 'src'),
+      exclude: ['**/__tests__/**', '**/*.spec.ts'],
       bundleTypes: true,
     }),
   ],
