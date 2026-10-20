@@ -1,6 +1,6 @@
 {
   "name": "@camera.ui/browser",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "camera.ui browser client",
   "author": "seydx (https://github.com/cameraui/clients)",
   "type": "module",
