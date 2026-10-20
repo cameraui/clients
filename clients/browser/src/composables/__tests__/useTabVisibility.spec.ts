@@ -5,8 +5,8 @@ class FakeDocument {
 
   private listeners = new Map<string, Set<() => void>>();
 
-  // vue's DOM runtime probes for a template element on import
   createElement(): object {
+    // vue's DOM runtime probes for a template element on import
     return {};
   }
 
@@ -37,8 +37,8 @@ class FakeDocument {
 
 let doc: FakeDocument;
 
-// the module keeps its listeners in module state, every test gets a fresh copy bound to a fresh document
 async function load() {
+  // the module keeps its listeners in module state, every test gets a fresh copy bound to a fresh document
   const { useTabVisibility } = await import('../useTabVisibility.js');
   return useTabVisibility();
 }

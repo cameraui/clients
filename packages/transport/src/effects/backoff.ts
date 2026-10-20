@@ -49,13 +49,7 @@ export function attachBackoff(options: BackoffOptions): Detach {
   }
 
   function scheduleFromPhase(phase: OfflinePhase, isReschedule: boolean): void {
-    // Two sources for the delay: our own local `schedule[attempt]` (the
-    // exponential bucket), and a server-issued BACKOFF_HINT carried in
-    // `phase.nextRetryAt`. We take the LATER of the two:
-    // never shorten below the server hint. Premature retries are the riskier
-    // mode: they hammer the backend right when it's already strained. The
-    // firstAttemptDelayMs hook may shorten only the LOCAL schedule, and only
-    // for the first attempt (transient-failure fast path).
+    // never retry before the server hint, the fast path only shortens the local schedule
     cancelTimer(isReschedule ? 'rescheduled' : undefined);
     const baseDelay = schedule[Math.min(attempt, schedule.length - 1)]!;
     const quick = attempt === 0 ? fastDelay() : undefined;

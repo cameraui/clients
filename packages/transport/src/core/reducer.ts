@@ -29,12 +29,9 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
     }
 
     case 'PROBE_FAILED_ALL': {
-      // from online this is the degraded-recovery escalation: channels are
-      // dead AND a probe just proved the endpoint unreachable — only then is
-      // tearing down live state justified
+      // from online this is the degraded-recovery escalation, the only case that tears down live state
       if (phase.kind !== 'discovering' && phase.kind !== 'online') return phase;
-      // `needs-auth` short-circuits the offline/backoff path: the user must
-      // act before any probe can succeed, so auto-retrying is pure noise.
+      // no backoff for needs-auth, no probe can succeed before the user acts
       if (action.error === 'needs-auth') {
         return {
           kind: 'needs-auth',
@@ -52,10 +49,7 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
 
     case 'TOKENS_REFRESHED': {
       if (phase.kind === 'online') {
-        // Idempotent: identical tokens → keep the same reference so no
-        // listener fires. Important for cross-tab ping-pong: tab A persists →
-        // tab B receives storage event → would re-dispatch with the same
-        // tokens, which would re-fire persist → another storage event → loop.
+        // same reference for identical tokens, otherwise cross-tab persistence ping-pongs forever
         if (tokensEqual(phase.target.tokens, action.tokens)) return phase;
         return { ...phase, target: { ...phase.target, tokens: action.tokens } };
       }
@@ -69,8 +63,7 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
 
     case 'TOKENS_INVALID': {
       if (phase.kind !== 'online') return phase;
-      // Transient (network) failure → tokens are still likely valid, route
-      // through offline so backoff retries pick them up later.
+      // network failure: the tokens are likely still valid, backoff retries with them
       if (action.transient === true) {
         return {
           kind: 'offline',
@@ -79,7 +72,6 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
           nextRetryAt: ctx.now() + DEFAULT_BACKOFF_MS,
         };
       }
-      // Permanent (server-rejected) failure → no retry without user action.
       return {
         kind: 'needs-auth',
         instanceId: phase.instanceId,
@@ -98,10 +90,6 @@ export function reducer(phase: ConnectionPhase, action: Action, ctx: ReducerCont
     }
 
     case 'BACKOFF_HINT': {
-      // Server-issued retry hint (e.g., proxy 503 with Retry-After). Only
-      // meaningful while we're already waiting (offline). Never SHORTEN —
-      // if the local schedule already says wait 60s and the server says 5s,
-      // we still wait 60s. Premature retries are the bigger risk.
       if (phase.kind !== 'offline') return phase;
       const now = ctx.now();
       const candidate = now + action.retryAfterMs;

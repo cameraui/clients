@@ -377,14 +377,12 @@ export class StreamConnection implements ReactiveStream {
         log.debug('start(): connecting WebSocket');
         const probe = await this.dialWithProbe();
 
-        // Stale check: restart()/stop() have started a new generation
         if (gen !== this.connectionGeneration) {
           log.debug('start() — generation stale after probe, aborting');
           return;
         }
 
-        // The probe is authoritative for this source — taint before
-        // connecting instead of waiting for the no-frames timeout.
+        // the probe is authoritative for this source, taint it now instead of waiting for the no-frames timeout
         if (probe && probedSourceId && this.probeSaysUnplayable(probe)) {
           this.triedSourceIds.add(probedSourceId);
         }
@@ -402,8 +400,7 @@ export class StreamConnection implements ReactiveStream {
           return;
         }
 
-        // settled on the probed source, or the probe failed: keep the socket and let
-        // the runtime net catch a wrong guess
+        // settled on the probed source, or the probe failed: keep the socket and let the runtime net catch a wrong guess
         if (!probe || this.source.value?._id === probedSourceId) break;
       }
       if (this.source.value?._id !== dialedSourceId) this.dialWithProbe();
@@ -433,16 +430,14 @@ export class StreamConnection implements ReactiveStream {
     this.requestedMode.value = mode;
     this.activeMode.value = mode === 'auto' ? 'webrtc' : mode;
 
-    // A mode switch changes codec playability (MSE vs WebRTC H.265 support
-    // differ) — re-evaluate from scratch when stuck in 'unsupported'.
+    // a mode switch changes codec playability, a stream stuck in unsupported re-evaluates from scratch
     if (this.status.value === 'unsupported') {
       this.stop();
       await this.start();
       return;
     }
 
-    // Only restart if already connected — during 'connecting', start() will
-    // pick up the updated refs naturally when it reaches handleWsOpen().
+    // while connecting, start() picks up the new refs in handleWsOpen()
     if (this.status.value === 'connected') {
       await this.restart();
     }
@@ -467,8 +462,7 @@ export class StreamConnection implements ReactiveStream {
       this.degradedFrom.value = result.degradedFrom;
       this.degradeReason.value = result.degradedFrom ? 'codec' : null;
 
-      // Only restart if already connected — during 'connecting', start()
-      // re-reads the source after its probe and dials again on a change.
+      // while connecting, start() re-reads the source after its probe and dials again on a change
       if (this.status.value === 'connected') {
         await this.restart();
       }
@@ -575,7 +569,6 @@ export class StreamConnection implements ReactiveStream {
       return;
     }
 
-    // Stale check
     if (gen !== this.connectionGeneration) return;
 
     if (!this.isReady.value) {
@@ -665,8 +658,7 @@ export class StreamConnection implements ReactiveStream {
     );
     this.stopWatchers.push(stopTokenWatch);
 
-    // camera updates swap the inner refs, not the device object — a stream
-    // stuck in 'unsupported' re-evaluates when source metadata changes
+    // camera updates swap the inner refs, not the device object, so a stream stuck in unsupported watches the sources
     const stopSourcesWatch = watch(
       () => this.camera.value?.sources.value,
       () => {
@@ -708,7 +700,6 @@ export class StreamConnection implements ReactiveStream {
         if (video) {
           this.onVideoPauseBound = () => {
             if (!this.paused.value) {
-              // Unintended pause → auto-resume
               video.play().catch(() => {});
             }
           };
@@ -746,15 +737,13 @@ export class StreamConnection implements ReactiveStream {
 
     const stopCameraWatch = watch([this.camera, this.videoElement, () => this.target.value], ([newCamera, newVideo, newClient], [oldCamera, oldVideo]) => {
       if (newCamera !== oldCamera) {
-        // Only restart when already connected — during 'connecting', start()
-        // picks up the current camera automatically (refs are already up-to-date)
+        // while connecting, start() picks up the current camera itself
         if (this.status.value === 'connected') {
           if (newCamera && newVideo && newClient) {
             this.restart();
           }
         } else if (this.status.value === 'unsupported' && newCamera && newVideo && newClient) {
-          // camera update may carry corrected codec metadata — re-evaluate;
-          // if nothing changed this lands back in 'unsupported' without connecting
+          // a camera update may carry corrected codec metadata, unchanged it lands back in unsupported without connecting
           this.stop();
           this.start();
         }
@@ -845,7 +834,7 @@ export class StreamConnection implements ReactiveStream {
       return { source: fallback, effectiveResolution: (fallback.role as StreamingRole) ?? 'low-resolution', degradedFrom: skippedUnplayable ? resolution : null };
     }
 
-    // sources exist but none is decodable here — terminal, not "no source"
+    // sources exist but none is decodable here: terminal, not "no source"
     if (skippedUnplayable || fallback) return 'unsupported';
     return undefined;
   }
@@ -1116,8 +1105,7 @@ export class StreamConnection implements ReactiveStream {
       try {
         msg = JSON.parse(ev.data);
       } catch {
-        // Malformed signaling frame — dropping it beats crashing the whole
-        // WS message dispatch.
+        // a malformed signaling frame is dropped instead of breaking the WS dispatch
         return;
       }
       this.handleMessage(msg);
@@ -1243,8 +1231,7 @@ export class StreamConnection implements ReactiveStream {
     const video = this.videoElement.value;
     if (!video) return;
 
-    // go2rtc answers audio-only when it cannot deliver the video codec —
-    // switching to that stream would freeze the picture with no way back
+    // go2rtc answers audio-only when it cannot deliver the video codec, switching to it would freeze the picture for good
     if (this.hasVideo.value && stream.getVideoTracks().length === 0) {
       this.handleWebRTCFailed();
       return;
@@ -1252,8 +1239,7 @@ export class StreamConnection implements ReactiveStream {
 
     this.noteDeliveredAudio(stream.getAudioTracks().length > 0);
 
-    // connectTimeout keeps running as a first-frame watchdog (a connected
-    // H.265 track can still decode to nothing) — handleFirstFrame stops it
+    // connectTimeout stays on as a first-frame watchdog until handleFirstFrame, a connected H.265 track can still decode to nothing
     this.activeMode.value = this.requestedMode.value === 'auto' ? 'webrtc' : (this.requestedMode.value as 'webrtc' | 'webrtc/tcp');
 
     this.lastMediaStream = stream;
@@ -1650,7 +1636,7 @@ export class StreamConnection implements ReactiveStream {
 
     this.closeBackchannel();
 
-    // Only the handle is ours; the wsTransport itself is owned by the app layer.
+    // only the handle is ours, the app layer owns the wsTransport
     this.disconnectWebSocket();
 
     const video = this.videoElement.value;

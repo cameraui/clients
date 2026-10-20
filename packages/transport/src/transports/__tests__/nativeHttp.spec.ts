@@ -16,8 +16,7 @@ import type { InternalAxiosRequestConfig } from 'axios';
 import type { NativeHttpRequest, NativeHttpResult } from '../nativeHttp.js';
 
 function cfg(o: Partial<InternalAxiosRequestConfig> = {}): InternalAxiosRequestConfig {
-  // axios always populates validateStatus from its defaults; mirror that so the
-  // adapter's settle behaviour matches real usage.
+  // axios always fills validateStatus from its defaults
   return { validateStatus: (s: number) => s >= 200 && s < 300, ...o, headers: AxiosHeaders.from((o.headers as AxiosHeaders) ?? {}) } as InternalAxiosRequestConfig;
 }
 

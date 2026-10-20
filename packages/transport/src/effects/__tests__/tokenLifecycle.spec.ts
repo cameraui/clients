@@ -139,19 +139,14 @@ describe('attachTokenLifecycle — auth-error reactive', () => {
     );
     attachTokenLifecycle({ kernel, transports: [transport], refresh, graceMs: 5_000 });
 
-    // Trigger proactive (waits for the timer).
     await vi.advanceTimersByTimeAsync(1_001);
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(refresh).toHaveBeenLastCalledWith(expect.anything(), 'proactive');
 
-    // Auth-error fires while proactive is still in flight — must be queued,
-    // not silently dropped.
     transport.emitAuthError(401);
     await Promise.resolve();
     expect(refresh).toHaveBeenCalledTimes(1);
 
-    // Resolve the proactive refresh — finally block should drain the pending
-    // auth-error and re-fire.
     resolvers[0]!({ access: 'at-1', accessExpiresAt: T0 + 60_000 });
     await Promise.resolve();
     await Promise.resolve();
@@ -186,7 +181,6 @@ describe('attachTokenLifecycle — auth-error reactive', () => {
     resolvers[0]!({ access: 'at-1', accessExpiresAt: T0 + 60_000 });
     await Promise.resolve();
     await Promise.resolve();
-    // Three auth-errors collapse to one queued follow-up.
     expect(refresh).toHaveBeenCalledTimes(2);
 
     resolvers[1]!({ access: 'at-2', accessExpiresAt: T0 + 90_000 });
@@ -205,20 +199,17 @@ describe('attachTokenLifecycle — auth-error reactive', () => {
     );
     attachTokenLifecycle({ kernel, transports: [transport], refresh, graceMs: 5_000 });
 
-    // Trigger auth-error first.
     transport.emitAuthError(401);
     await Promise.resolve();
     expect(refresh).toHaveBeenCalledTimes(1);
 
-    // Advance time so the proactive timer would fire — should be no-op while
-    // auth-error is in-flight.
+    // the proactive timer would fire here
     await vi.advanceTimersByTimeAsync(10_000);
     expect(refresh).toHaveBeenCalledTimes(1);
 
     resolvers[0]!({ access: 'at-1', accessExpiresAt: T0 + 60_000 });
     await Promise.resolve();
     await Promise.resolve();
-    // No queued proactive — refresh stays at 1.
     expect(refresh).toHaveBeenCalledTimes(1);
   });
 });
@@ -270,8 +261,6 @@ describe('attachTokenLifecycle — transient errors', () => {
     await vi.advanceTimersByTimeAsync(1_001);
 
     expect(refresh).toHaveBeenCalledTimes(3);
-    // Transient retries exhausted → still routed as `offline` + backoff.
-    // The refresh-token itself may still be valid; only the network is hosed.
     expect(kernel.phase.kind).toBe('offline');
   });
 
@@ -290,11 +279,10 @@ describe('attachTokenLifecycle — transient errors', () => {
       maxServerErrorRetries: 1,
     });
 
-    await vi.advanceTimersByTimeAsync(25_001); // proactive: 5xx #1 → one retry queued
+    await vi.advanceTimersByTimeAsync(25_001);
     expect(kernel.phase.kind).toBe('online');
-    await vi.advanceTimersByTimeAsync(1_001); // retry: 5xx #2 → server-error budget spent
-    expect(refresh).toHaveBeenCalledTimes(2); // not 6 — capped by maxServerErrorRetries
-    // 5xx stays transient → offline (rediscover), never needs-auth
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(refresh).toHaveBeenCalledTimes(2); // not 6, capped by maxServerErrorRetries
     expect(kernel.phase.kind).toBe('offline');
   });
 
@@ -309,15 +297,15 @@ describe('attachTokenLifecycle — transient errors', () => {
       transientRetryDelayMs: 1_000,
       maxTransientRetries: 3,
       isTransientError: () => true,
-      isServerError: (err: any) => err?.status >= 500, // 0 → not a server error
+      isServerError: (err: any) => err?.status >= 500,
       maxServerErrorRetries: 1,
     });
 
-    await vi.advanceTimersByTimeAsync(25_001); // #1
-    await vi.advanceTimersByTimeAsync(1_001); // #2
-    await vi.advanceTimersByTimeAsync(1_001); // #3
+    await vi.advanceTimersByTimeAsync(25_001);
+    await vi.advanceTimersByTimeAsync(1_001);
+    await vi.advanceTimersByTimeAsync(1_001);
     expect(kernel.phase.kind).toBe('online'); // budget of 3 not spent yet
-    await vi.advanceTimersByTimeAsync(1_001); // #4 → give up
+    await vi.advanceTimersByTimeAsync(1_001);
     expect(refresh).toHaveBeenCalledTimes(4);
     expect(kernel.phase.kind).toBe('offline');
   });
@@ -357,13 +345,13 @@ describe('attachTokenLifecycle — transient errors', () => {
       isTransientError: (err: any) => err?.transient === true,
     });
 
-    // Proactive fires: fail → retry budget consumed; retry: success → counter resets
+    // the proactive refresh fails, its retry succeeds and resets the budget
     await vi.advanceTimersByTimeAsync(25_001);
     await vi.advanceTimersByTimeAsync(1_001);
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(kernel.phase.kind).toBe('online');
 
-    // auth-error trigger fails — with a fresh retry budget, must stay online (not go offline)
+    // with a fresh budget a failed auth-error refresh stays online
     transport.emitAuthError(401);
     await Promise.resolve();
     await Promise.resolve();
@@ -381,13 +369,12 @@ describe('attachTokenLifecycle — wake (visibility-resume hook)', () => {
   }
 
   it('triggers a refresh when the AT is inside the grace window at wake time', async () => {
-    // AT expires at T0+30s, graceMs=5s → grace boundary at T0+25s.
+    // grace boundary at T0 + 25s
     const kernel = createKernel({ context: makeCtx(), initial: onlineWith(T0 + 30_000) });
     const refresh = vi.fn().mockResolvedValue({ access: 'at-1', accessExpiresAt: T0 + 90_000 } satisfies Tokens);
     const lc = attachTokenLifecycle({ kernel, transports: [], refresh, graceMs: 5_000 });
 
-    // Jump past the grace boundary WITHOUT advancing fake timers — models
-    // Capacitor's "JS frozen during suspend" behavior.
+    // no timers advance, like JS frozen during a Capacitor suspend
     vi.setSystemTime(T0 + 26_000);
     lc.wake();
     await flushMicrotasks();
@@ -401,7 +388,6 @@ describe('attachTokenLifecycle — wake (visibility-resume hook)', () => {
     const refresh = vi.fn().mockResolvedValue({ access: 'at-1', accessExpiresAt: T0 + 200_000 } satisfies Tokens);
     const lc = attachTokenLifecycle({ kernel, transports: [], refresh, graceMs: 5_000 });
 
-    // 3h past expiry — extreme suspend case.
     vi.setSystemTime(T0 + 3 * 60 * 60_000);
     lc.wake();
     await flushMicrotasks();
@@ -414,7 +400,7 @@ describe('attachTokenLifecycle — wake (visibility-resume hook)', () => {
     const refresh = vi.fn().mockResolvedValue({ access: 'at-1', accessExpiresAt: T0 + 60_000 } satisfies Tokens);
     const lc = attachTokenLifecycle({ kernel, transports: [], refresh, graceMs: 5_000 });
 
-    // Only 2s elapsed — AT TTL is still 28s, well above graceMs.
+    // 28s left, well above graceMs
     vi.setSystemTime(T0 + 2_000);
     lc.wake();
     await flushMicrotasks();
@@ -423,7 +409,7 @@ describe('attachTokenLifecycle — wake (visibility-resume hook)', () => {
   });
 
   it('is a no-op when phase is not online', async () => {
-    // Default kernel is idle.
+    // the default kernel is idle
     const kernel = createKernel({ context: makeCtx() });
     const refresh = vi.fn();
     const lc = attachTokenLifecycle({ kernel, transports: [], refresh, graceMs: 5_000 });
@@ -465,8 +451,7 @@ describe('attachTokenLifecycle — detach', () => {
 
 describe('attachTokenLifecycle — refresh lock (cross-tab coordination)', () => {
   async function flush(): Promise<void> {
-    // Microtask flush only — do NOT advance time, otherwise the proactive
-    // timer fires after the auth-error refresh and we count an extra call.
+    // microtasks only, advancing time would fire the proactive timer and count an extra call
     for (let i = 0; i < 6; i++) await Promise.resolve();
   }
 
@@ -560,9 +545,7 @@ describe('attachTokenLifecycle — refresh lock (cross-tab coordination)', () =>
   });
 
   it('serializes concurrent refreshes through an async mutex', async () => {
-    // Simulate two attached lifecycles sharing the same lock — like two tabs
-    // coordinating via navigator.locks. Without the lock both refreshes would
-    // race; with it they run strictly sequentially.
+    // two lifecycles sharing one lock, like two tabs on navigator.locks
     let busy = false;
     let maxConcurrent = 0;
     let concurrent = 0;
@@ -591,8 +574,7 @@ describe('attachTokenLifecycle — refresh lock (cross-tab coordination)', () =>
     let refreshes = 0;
     const slowRefresh = vi.fn(async () => {
       refreshes++;
-      // Resolve in the next microtask so we can observe both auth-errors
-      // queue up in the lock before either resolves.
+      // next microtask, so both auth-errors queue in the lock first
       await Promise.resolve();
       return { access: `at-${refreshes}`, accessExpiresAt: T0 + 60_000 } satisfies Tokens;
     });

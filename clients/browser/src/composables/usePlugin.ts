@@ -75,8 +75,7 @@ export function clearPluginCache(): void {
     try {
       reset();
     } catch {
-      // Each instance handles its own cleanup; one throwing must not stop
-      // the rest from resetting.
+      // one instance throwing must not stop the rest from resetting
     }
   }
 }
@@ -215,8 +214,7 @@ export async function ensureStatusSubscription(rpc: Readonly<ShallowRef<RPCClien
   try {
     statusUnsubscribe = await client.subscribe<PluginStatusMessage>(NamespaceManager.coreManagerNamespaces().coreManagerSubject, handleStatusMessage);
   } catch {
-    // the next load re-arms the subscription; the backoff carries the state
-    // change in the meantime
+    // the next load re-arms the subscription, the backoff carries the state change meanwhile
     statusClient = undefined;
   }
 }
@@ -311,8 +309,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>, options: UsePlug
     watchPlugin(name);
     ensureStatusSubscription(rpc);
 
-    // the plugin went down: the cache entry is dropped while this instance
-    // still holds its ref, so re-resolve instead of handing out the dead proxy
+    // the plugin went down and its cache entry is gone, re-resolve instead of handing out the dead proxy
     if (currentPluginName === name && pluginCache.get(name) !== heldPlugin) {
       currentPluginName = undefined;
       heldPlugin = undefined;
@@ -364,8 +361,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>, options: UsePlug
         throw new Error(`Plugin "${name}" not found`);
       }
 
-      // a stopped, restarting or updating plugin answers nothing, so hand out
-      // no proxy at all instead of one that fails every call
+      // a stopped, restarting or updating plugin answers nothing, a proxy would fail every call
       if (pluginInfo.running === false) {
         return undefined;
       }
@@ -442,8 +438,7 @@ export function usePlugin(pluginName: MaybeRefOrGetter<string>, options: UsePlug
   watch(
     [isConnected, () => toValue(pluginName), rpc],
     async ([connected, name, currentClient]) => {
-      // a short drop clears rpc and brings the same client back, its proxies keep working;
-      // a proxy from another client answers nothing
+      // a short drop brings the same client back and its proxies keep working, a proxy from another client answers nothing
       const renamed = !!currentPluginName && name !== currentPluginName;
       if (currentPluginName && (renamed || (currentClient && heldPlugin && heldPlugin.client !== currentClient))) {
         if (renamed) unwatchPlugin(currentPluginName);

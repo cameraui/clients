@@ -12,7 +12,6 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-// schedules again from every run, like a retry that keeps failing
 async function delaysOf(retry: RetryTimer, runs: number): Promise<number[]> {
   const delays: number[] = [];
   let last = Date.now();

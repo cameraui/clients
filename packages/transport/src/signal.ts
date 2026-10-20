@@ -62,8 +62,7 @@ export function createConnectionSignal(options: ConnectionSignalOptions): Connec
         const channels = options.transports.filter((t) => t.spec.phaseGating && !t.health().up).map((t) => t.spec.id);
         if (channels.length === 0) return { kind: 'online' };
         if (anyChannelEverUp) return { kind: 'degraded', channels };
-        // transports still doing their FIRST connect are not degraded, until that takes long enough to point at
-        // a blocked path (a reverse proxy without websocket upgrade answers REST but never lets a channel up)
+        // a first connect is not degraded until it takes long enough to point at a blocked path, like a proxy without websocket upgrade
         return firstConnectOverdue ? { kind: 'degraded', channels, reason: 'first-connect' } : { kind: 'connecting' };
       }
     }
@@ -120,7 +119,7 @@ export function createConnectionSignal(options: ConnectionSignalOptions): Connec
       clearPending();
       return;
     }
-    // improvements and hard states land instantly; badness must persist
+    // improvements and hard states land instantly, badness must persist
     if (raw.kind === 'online' || raw.kind === 'connecting' || raw.kind === 'needs-auth') {
       apply(raw);
       return;

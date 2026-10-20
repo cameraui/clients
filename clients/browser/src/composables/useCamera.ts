@@ -253,10 +253,10 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
     sensorStates.value = response.sensorStates;
   }
 
-  // a plugin restart reconnects all its sensors at once, their events arrive in one task
   function refreshForSensors(): void {
     if (sensorRefreshQueued || closed) return;
     sensorRefreshQueued = true;
+    // a plugin restart reconnects all its sensors at once, their events arrive in one task
     queueMicrotask(() => {
       sensorRefreshQueued = false;
       if (!closed) refreshStatesCoalesced().catch(() => {});

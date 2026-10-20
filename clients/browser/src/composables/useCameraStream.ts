@@ -394,10 +394,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
 
     if (!container || !camName || !isConnected.value) return;
 
-    // the single shared <video> cannot sit in two visible cards at once (dashboard card + dialog,
-    // the same camera in two grids): joining would start a tug-of-war over the element, so the
-    // newcomer runs its own session. A short grace re-check first: on expand/remount the old host
-    // is still visible for a beat before it hides, and that handover must stay a seamless join.
+    // one shared <video> can't sit in two visible cards, the newcomer goes isolated; the recheck keeps an expand or remount a seamless join
     const existing = streamManager.get(camName);
     if (existing && existing.refCount > 0) {
       const activeHost = existing.containerElementRef.value;
@@ -445,10 +442,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
         video.srcObject = cached.mediaStream;
       }
 
-      // Switch the active host ref to our container so release() can later
-      // fall back to a remaining consumer if we unmount first. The shared
-      // <video> is moved by the insertVideoIntoContainer watcher once
-      // videoElement.value is set.
+      // release() falls back to a remaining consumer when this one unmounts first
       if (container) {
         cached.containerElementRef = containerElement;
       }
@@ -697,8 +691,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     clearOffscreenTimer();
     clearResumeTimer();
 
-    // Immediately mute audio — stream may continue running (cached/debounced)
-    // but the user should not hear audio from an unmounted component.
+    // a cached or debounced stream keeps running, an unmounted view must not stay audible
     currentStream.value?.setMuted(true);
     const video = videoElement.value;
     if (video) video.muted = true;
@@ -718,12 +711,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
         streamManager.release(camName, video, containerElement);
       }
 
-      // The manager owns the stream lifecycle only when OUR connection was
-      // registered (currentStream === ownedStream): other consumers keep it
-      // alive, and doRelease() destroys it once the refcount hits zero. When
-      // we rode a cached stream (or never initialized), the owned connection
-      // never entered the manager — destroy it here or its detached scope
-      // (watchers, visibility hooks) leaks for the page lifetime.
+      // an owned connection that never entered the manager leaks its detached scope unless destroyed here
       if (!initialized.value || currentStream.value !== ownedStream) {
         ownedConnection?.destroy();
       }
@@ -923,9 +911,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
         !isCameraDisabled.value &&
         !deferUntilSeen()
       ) {
-        // startDelay elapsed after initialize — trigger the deferred auto-start.
-        // Gated on always-on like the initialize paths: standby/activity
-        // consumers start via activity triggers, not the stagger timer.
+        // startDelay elapsed, standby and activity consumers start via their triggers instead
         currentStream.value?.start();
       }
     },

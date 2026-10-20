@@ -12,8 +12,8 @@ export interface LoggerState {
 
 const KEY = '__cuiLoggerState__';
 
-// Pinned to globalThis so multiple bundled copies in one runtime share one buffer + flag.
 export function loggerState(): LoggerState {
+  // on globalThis so bundled copies in one runtime share one buffer and flag
   const g = globalThis as unknown as Record<string, LoggerState | undefined>;
   let state = g[KEY];
   if (!state) {

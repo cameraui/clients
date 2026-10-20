@@ -30,8 +30,7 @@ function syncTargetFor(phase: ConnectionPhase): SyncDecision {
     case 'online':
       return phase.target;
     case 'discovering':
-      // Hold the previous target while probing — transports stay on their
-      // current connection until a new one is committed via online.
+      // transports stay on their current connection while probing
       return SKIP;
   }
 }
@@ -39,9 +38,6 @@ function syncTargetFor(phase: ConnectionPhase): SyncDecision {
 export function attachTransportSync(options: TransportSyncOptions): Detach {
   let detached = false;
   const retryMs = options.retryMs ?? DEFAULT_RETRY_MS;
-  // applied state is per transport: a failed apply() rolls back only that
-  // transport's entry and retries, so one transport's failed connect can no
-  // longer orphan it behind a shared same-target dedupe
   const applied = new Map<Transport, ConnectionTarget | null>();
   const retryTimers = new Map<Transport, ReturnType<typeof setTimeout>>();
   let lastNotified: ConnectionTarget | null | undefined;

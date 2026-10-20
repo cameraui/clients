@@ -43,7 +43,6 @@ class FakeHost implements WorkerHost {
     return this.listeners.size;
   }
 
-  /** Test helper — simulate the worker sending a message back. */
   deliver(msg: WorkerMessage): void {
     const event = new MessageEvent<WorkerMessage>('message', { data: msg });
     for (const l of [...this.listeners]) l(event);
@@ -90,7 +89,6 @@ describe('attachWorkerBridge', () => {
     expect(a.sent.length).toBe(1);
     expect(b.sent.length).toBe(1);
     expect(c.sent.length).toBe(1);
-    // All hosts see the same generation for the same phase change.
     expect((a.sent[0] as KernelSyncMessage).generation).toBe(1);
     expect((b.sent[0] as KernelSyncMessage).generation).toBe(1);
     expect((c.sent[0] as KernelSyncMessage).generation).toBe(1);
@@ -104,7 +102,6 @@ describe('attachWorkerBridge', () => {
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     expect(hosts[0]!.sent.length).toBe(1);
 
-    // New host joins after first broadcast.
     const newHost = new FakeHost();
     hosts.push(newHost);
 
@@ -121,8 +118,6 @@ describe('attachWorkerBridge', () => {
     const host = new FakeHost();
     const bridge = attachWorkerBridge({ kernel, hosts: () => [host] });
 
-    // No phase change yet, but we want the freshly-spawned worker to know
-    // the current state.
     bridge.syncHost(host);
 
     expect(host.sent.length).toBe(1);
@@ -149,7 +144,7 @@ describe('attachWorkerBridge', () => {
     bridge.revalidateWorkers();
     expect(a.sent).toEqual([{ type: 'kernel-revalidate' }]);
     expect(b.sent).toEqual([{ type: 'kernel-revalidate' }]);
-    // Not phase-gated: a second call always re-sends (no dedup/generation).
+    // not phase-gated, every call re-sends
     bridge.revalidateWorkers();
     expect(a.sent.length).toBe(2);
 
@@ -164,7 +159,7 @@ describe('attachWorkerBridge', () => {
     attachWorkerBridge({ kernel, hosts: () => [bad, good] });
 
     expect(() => kernel.dispatch({ type: 'BOOT', instanceId: 'a' })).not.toThrow();
-    expect(good.sent.length).toBe(1); // good host still got it
+    expect(good.sent.length).toBe(1);
     expect(bad.sent.length).toBe(0);
   });
 
@@ -173,11 +168,10 @@ describe('attachWorkerBridge', () => {
     const host = new FakeHost();
     const bridge = attachWorkerBridge({ kernel, hosts: () => [host], listenForResyncRequests: true });
 
-    // First broadcast triggers the host listener registration.
+    // the first broadcast registers the host listener
     kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: { access: 'at-2' } });
     const initialCount = host.sent.length;
 
-    // Worker requests resync.
     host.deliver({ type: 'kernel-sync-request' });
 
     expect(host.sent.length).toBe(initialCount + 1);
@@ -206,7 +200,7 @@ describe('attachWorkerBridge', () => {
 
     bridge.detach();
     kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
-    expect(host.sent.length).toBe(1); // no new broadcast
+    expect(host.sent.length).toBe(1);
 
     host.deliver({ type: 'kernel-sync-request' });
     expect(host.sent.length).toBe(1); // listener detached

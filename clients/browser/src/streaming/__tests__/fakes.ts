@@ -100,7 +100,6 @@ export interface SampleSpec {
   cts?: number;
 }
 
-// tfhd-defaults is what go2rtc writes: one sample, duration and flags in tfhd
 export type FragmentLayout = 'tfhd-defaults' | 'first-sample-flags' | 'per-sample' | 'trex-defaults';
 
 export interface FragmentSpec {
@@ -219,7 +218,6 @@ function ranges(list: [number, number][]): TimeRanges {
 
 const EMPTY_RANGES = ranges([]);
 
-// coded frame removal per the MSE spec: removing a keyframe also drops every frame that depends on it
 export class FakeSourceBuffer extends Emitter {
   mode = 'sequence';
   updating = false;
@@ -269,6 +267,7 @@ export class FakeSourceBuffer extends Emitter {
     this.updating = true;
     queueMicrotask(() => {
       const kept = this.frames.filter((f) => f.pts < start || f.pts >= end);
+      // coded frame removal per the MSE spec: a removed keyframe takes every frame that depends on it
       const keys = new Set(kept.filter((f) => f.key).map((f) => f.pts));
       this.frames = kept.filter((f) => f.key || keys.has(f.gop));
       this.cachedRanges = undefined;
@@ -338,7 +337,6 @@ export class FakeMediaSource extends Emitter {
 const objectUrls = new Map<string, FakeMediaSource>();
 let objectUrlSeq = 0;
 
-// plays through decodable frames only, a playhead on a missing frame stalls like a real element
 export class FakeVideo extends Emitter {
   currentTime = 0;
   playbackRate = 1;
@@ -429,7 +427,6 @@ export class FakeVideo extends Emitter {
     return { totalVideoFrames: this.decodedFrames };
   }
 
-  // a decoded frame reaches the screen: counters, readyState and frame callbacks move like in a browser
   presentFrame(): void {
     this.decodedFrames++;
     if (this.readyState < 2) {
@@ -553,7 +550,6 @@ export class FakeWsHandle {
 
 export class FakeWsTransport {
   handles: FakeWsHandle[] = [];
-  // the real transport reports CLOSED while its resolveUrl hook is still pending
   hangResolve = false;
 
   get handleCount(): number {
@@ -562,6 +558,7 @@ export class FakeWsTransport {
 
   open(spec: { path: string; query?: Record<string, string> }): FakeWsHandle {
     const handle = new FakeWsHandle(spec);
+    // the real transport reports CLOSED while its resolveUrl hook is still pending
     if (this.hangResolve) handle.readyState = 3;
     this.handles.push(handle);
     return handle;
@@ -594,8 +591,8 @@ export class FakeMediaStream {
   }
 }
 
-// SOI, frame id, size, EOI: enough for FakeImageDecoder to tell frames apart
 export function jpegFrame(id: number, width = 640, height = 480): ArrayBuffer {
+  // SOI, frame id, size, EOI: enough for FakeImageDecoder to tell frames apart
   const bytes = new Uint8Array(10);
   const view = new DataView(bytes.buffer);
   view.setUint16(0, 0xffd8);
@@ -630,7 +627,6 @@ export class FakeCanvas {
   }
 }
 
-// a held decoder keeps its frame until release(), the frames behind it queue up in the handler
 export class FakeImageDecoder {
   calls = 0;
 

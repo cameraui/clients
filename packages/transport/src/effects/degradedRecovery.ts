@@ -68,10 +68,7 @@ export function attachDegradedRecovery(options: DegradedRecoveryOptions): Detach
     const outcome = await options.probe();
     if (detached || options.signal.current.kind !== 'degraded') return;
     if (outcome === 'failed') {
-      // a failed probe is a false negative when a channel already reconnected
-      // to the same endpoint: on a cold-radio wake the HTTP probe can time out
-      // while nats is back up. tearing down here would kill a healed
-      // connection. Hold, and let the still-down channel recover on its own
+      // false negative when a channel is already back, on a cold-radio wake the probe can time out while nats is up
       if (options.isReachable?.()) {
         options.onHold?.('probe failed but a channel is up — holding');
         rearm();
@@ -81,8 +78,7 @@ export function attachDegradedRecovery(options: DegradedRecoveryOptions): Detach
       options.kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'degraded: endpoint unreachable' });
       return;
     }
-    // endpoint reachable (or swapped): the channels own their recovery,
-    // check again after the next grace window
+    // endpoint reachable: the channels own their recovery
     rearm();
   }
 

@@ -75,7 +75,7 @@ export function createWorkerKernelMirror(options: WorkerKernelMirrorOptions): Wo
     }
 
     if (msg.type !== 'kernel-sync') return;
-    if (msg.generation <= lastGeneration) return; // stale or duplicate
+    if (msg.generation <= lastGeneration) return;
     lastGeneration = msg.generation;
     hasResolver = msg.resolver === true;
     const prev = current;

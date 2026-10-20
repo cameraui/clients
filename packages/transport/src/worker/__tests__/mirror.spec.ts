@@ -36,7 +36,6 @@ class FakeSource implements MessageSource {
     this.listeners.delete(listener);
   }
 
-  /** Test helper — simulate the main thread delivering a message. */
   deliver(msg: WorkerMessage): void {
     const event = new MessageEvent<WorkerMessage>('message', { data: msg });
     for (const l of [...this.listeners]) l(event);
@@ -80,7 +79,6 @@ describe('createWorkerKernelMirror', () => {
     expect(mirror.target?.endpoint).toBe(LAN);
     expect(mirror.target?.tokens).toBe(TOKENS);
 
-    // offline → no target
     source.deliver(makeSyncMessage(2, { kind: 'offline', instanceId: 'a', lastError: 'x', nextRetryAt: 0 }));
     expect(mirror.target).toBeNull();
   });
@@ -94,7 +92,6 @@ describe('createWorkerKernelMirror', () => {
     source.deliver(makeSyncMessage(5, onlinePhase()));
     expect(listener).toHaveBeenCalledTimes(1);
 
-    // Old generation arrives later (race) — ignored.
     source.deliver(makeSyncMessage(3, { kind: 'idle' }));
     expect(listener).toHaveBeenCalledTimes(1);
     expect(mirror.phase.kind).toBe('online');
@@ -169,7 +166,6 @@ describe('createWorkerKernelMirror', () => {
     source.deliver(makeSyncMessage(1, onlinePhase()));
     expect(listener).not.toHaveBeenCalled();
 
-    // requestSync after dispose is a no-op (defensive).
     mirror.requestSync();
     expect(source.sent).toEqual([]);
   });
@@ -182,7 +178,6 @@ describe('createWorkerKernelMirror', () => {
 
     source.deliver({ type: 'kernel-revalidate' });
     expect(listener).toHaveBeenCalledTimes(1);
-    // Stateless — no dedup, every message re-fires.
     source.deliver({ type: 'kernel-revalidate' });
     expect(listener).toHaveBeenCalledTimes(2);
   });

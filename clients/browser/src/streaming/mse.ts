@@ -140,9 +140,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
         sourceBuffer.appendBuffer(pendingBuffer.subarray(0, pendingLength));
         pendingLength = 0;
       } catch (err) {
-        // A swallowed failure here would stall the pipeline permanently: no
-        // new update → no updateend → the queue never drains again and every
-        // incoming frame accumulates until overflow.
+        // a swallowed failure stalls the pipeline for good: no updateend, the queue never drains again
         if (!recoverFromQuota(err)) {
           fail(err, 'runtime');
           return;
@@ -172,7 +170,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
           sourceBuffer.remove(start0, cut - CUT_MARGIN);
           mediaSource.setLiveSeekableRange(cut, end);
         } catch {
-          // Ignore errors
+          // ignore
         }
         forgetKeyframesBefore(cut);
       }
@@ -213,9 +211,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
 
     if (sourceBuffer.updating || pendingLength > 0) {
       if (!enqueue(new Uint8Array(data))) {
-        // Queue overflow — the SourceBuffer stopped draining. Uint8Array.set
-        // would throw an uncaught RangeError inside the WS dispatch; surface
-        // a proper error instead so the connection layer can recover.
+        // the SourceBuffer stopped draining, Uint8Array.set would throw an uncaught RangeError in the WS dispatch
         pendingLength = 0;
         fail(new Error('MSE pending buffer overflow'), 'runtime');
         return;
@@ -225,8 +221,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
         sourceBuffer.appendBuffer(data);
       } catch (err) {
         if (recoverFromQuota(err)) {
-          // Queue the frame — the updateend fired by the eviction retries the
-          // drain with it.
+          // the updateend of the eviction retries the drain with this frame
           enqueue(new Uint8Array(data));
         } else {
           fail(err, 'runtime');
@@ -321,7 +316,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
         try {
           mediaSource.removeSourceBuffer(sourceBuffer);
         } catch {
-          // Ignore errors
+          // ignore
         }
       }
       sourceBuffer = null;
@@ -331,7 +326,7 @@ export function createMSEHandler(options: MSEHandlerOptions): MSEHandler {
       try {
         mediaSource.endOfStream();
       } catch {
-        // Ignore errors
+        // ignore
       }
     }
     mediaSource = null;

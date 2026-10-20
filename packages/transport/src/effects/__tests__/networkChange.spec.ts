@@ -60,7 +60,7 @@ describe('attachNetworkChange', () => {
 
     detach();
     source.dispatchEvent(new Event('change'));
-    expect(onChange).toHaveBeenCalledOnce(); // still 1
+    expect(onChange).toHaveBeenCalledOnce();
   });
 
   it('allows the handler to dispatch on the kernel (common pattern)', () => {

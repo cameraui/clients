@@ -4,7 +4,6 @@ import { subscribeStore } from './store.js';
 
 import type { Unsubscribe } from './types.js';
 
-// Re-exported here so a worker gets Logger + capture from the SAME bundle (and buffer) as the bridge.
 export { installConsoleCapture } from './console.js';
 export { Logger } from './logger.js';
 export type { LogEntry, LogLevel } from './types.js';

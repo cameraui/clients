@@ -110,7 +110,6 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     return resolveQuery({ target, path: socketPath(target), query: base });
   }
 
-  // resolved queries expire (signed paths): the manager re-reads opts.query on every reconnect
   async function refreshQuery(): Promise<void> {
     const target = currentTarget;
     if (!resolveQuery || !target || disposed) return;
@@ -119,6 +118,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
     try {
       const query = await queryFor(target);
       if (currentTarget !== target || disposed) return;
+      // signed queries expire, the manager re-reads opts.query on every reconnect
       if (manager) manager.opts.query = query;
     } catch (err) {
       logger?.warn(`query refresh failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -301,8 +301,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
 
     if (endpointChanged || !manager) {
       const epoch = ++applyEpoch;
-      // tear down before the first await so nothing in between picks up an old endpoint's socket,
-      // the manager stays null until the signed query resolves
+      // tear down before the first await so nothing in between picks up an old endpoint's socket
       for (const ns of sockets.keys()) {
         if (ns !== mainNs) reopen.add(ns);
       }
@@ -311,8 +310,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
       try {
         await rebuildManager(target, epoch);
       } catch (err) {
-        // a failed rebuild must not leave currentTarget pointing at a target we
-        // never connected to, the same-target dedupe would swallow every retry
+        // a target we never connected to would make the same-target dedupe swallow every retry
         if (epoch === applyEpoch && currentTarget === target) currentTarget = null;
         throw err;
       }
@@ -404,9 +402,7 @@ export function createSocketioTransport(options: SocketioTransportOptions = {}):
   function reviveDeadSockets(): void {
     if (!currentTarget) return;
     if (status.up && isDeadNow()) {
-      // engine still claims connected but the wall clock says the socket died
-      // in background — force-close it so every namespace reconnects now
-      // instead of after the engine's own ping timeout
+      // the socket died in background, reconnect now instead of at the engine's ping timeout
       logger?.debug('reviveDeadSockets: engine stale — forcing reconnect');
       lastActivityAt = Date.now();
       manager?.engine?.close();

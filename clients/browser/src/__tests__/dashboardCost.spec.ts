@@ -14,7 +14,6 @@ import type { CameraUiContext } from '../types.js';
 type Handler = (msg: unknown) => void;
 
 interface ServerOptions {
-  // answers an unchanged snapshot without its bytes and names the cameras of a reconnected sensor
   current: boolean;
   rttMs: number;
 }
@@ -205,7 +204,6 @@ function fakeTransport(initial: FakeClient) {
   return { transport, link };
 }
 
-// the cards of a dashboard: the card loads its device by name, its snapshot by the camera object
 async function runDashboard(options: ServerOptions): Promise<Record<string, Cost>> {
   const server = new FakeServer(options);
   let main = new FakeClient(server);

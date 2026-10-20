@@ -85,7 +85,7 @@ describe('attachPresence — network events', () => {
     const dispatchSpy = vi.spyOn(kernel, 'dispatch');
 
     attachPresence({ kernel, networkSource: null });
-    // No way to fire an online event without a window — just confirm no crash.
+    // no window to fire an online event, only check it does not crash
     expect(dispatchSpy).not.toHaveBeenCalled();
   });
 });

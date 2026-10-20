@@ -85,7 +85,6 @@ function renewToken(target: ReturnType<typeof setup>['target'], access: string):
   target.value = { ...target.value, tokens: { access } };
 }
 
-// MSE negotiated and its first frame on screen
 async function playMse(handle: FakeWsHandle, video: FakeVideo): Promise<void> {
   await negotiate(handle);
   await feed(handle, 5);

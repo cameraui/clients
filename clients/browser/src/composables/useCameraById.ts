@@ -61,7 +61,6 @@ function acquireCached(key: string): ReactiveCameraDevice | undefined {
   });
 }
 
-// the caller holds one reference to the returned device and releases it with releaseCameraDevice
 export async function acquireCameraDevice(
   deviceManager: { getCamera: (id: string) => Promise<ReactiveCameraDevice | undefined> },
   key: string,
@@ -118,7 +117,6 @@ export function useCameraById(cameraIdOrName: MaybeRefOrGetter<string>): UseCame
   const initialLoadDone = ref(false);
   const error = ref<Error | undefined>();
 
-  // the name or id the bound device was loaded for
   let boundKey: string | undefined;
   const loadRetry = createRetryTimer();
   let disposed = false;

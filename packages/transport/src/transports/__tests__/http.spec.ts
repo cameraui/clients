@@ -80,7 +80,7 @@ describe('createHttpTransport — request interceptor', () => {
     }));
     t.client.defaults.adapter = adapter as any;
     const p = t.client.get('/cameras');
-    // Let the async interceptor register its waiter before the target lands.
+    // let the async interceptor register its waiter first
     await new Promise((r) => setTimeout(r, 10));
     await t.apply(T1);
     await p;

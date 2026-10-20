@@ -39,7 +39,7 @@ export function createDebouncedCache<T>(options: DebouncedCacheOptions<T> = {}):
       try {
         onRelease?.(key, entry.value);
       } catch {
-        // Ignore cleanup errors
+        // ignore
       }
       cache.delete(key);
     }

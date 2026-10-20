@@ -108,8 +108,7 @@ export function createNativeHttpAdapter(binding: NativeHttpBinding): AxiosAdapte
       res = await raceNative(pending, config, timeout);
     } catch (err) {
       if (err instanceof AxiosError) throw err;
-      // Native transport failure → axios "network error" (no response) so the
-      // probe loop classifies it as transient, identical to an XHR network error.
+      // an axios network error, so the probe loop treats it as transient like an XHR failure
       throw new AxiosError(err instanceof Error ? err.message : 'Network Error', AxiosError.ERR_NETWORK, config, pending);
     }
 
@@ -208,9 +207,7 @@ function normalizeParams(params: unknown): Record<string, string> | undefined {
 
 export function normalizeBody(config: InternalAxiosRequestConfig): unknown {
   const data: unknown = config.data;
-  // axios keeps an explicit null body (e.g. put(url, null)); the Capacitor
-  // bridge turns null into NSNull and iOS fails the request with
-  // CapacitorUrlRequestError. undefined drops the key entirely.
+  // the Capacitor bridge turns a null body into NSNull and iOS fails the request
   if (data == null) return undefined;
   if (typeof data !== 'string') return data;
   const contentType = String(AxiosHeaders.from(config.headers as AxiosHeaders).get('Content-Type') ?? '');
@@ -218,7 +215,7 @@ export function normalizeBody(config: InternalAxiosRequestConfig): unknown {
     try {
       return JSON.parse(data);
     } catch {
-      // Not actually JSON — send the raw string.
+      // not JSON, send the raw string
     }
   }
   return data;

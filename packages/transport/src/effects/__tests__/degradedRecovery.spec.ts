@@ -134,16 +134,16 @@ describe('attachDegradedRecovery', () => {
   it('probe failed but a channel is still up → holds online and re-arms (false-negative on cold-radio wake)', async () => {
     const { kernel, socketio, probe, onHold, detach } = await setupPair(['failed']);
 
-    socketio.emitDown('gone'); // socketio down, nats stays up → degraded but reachable
+    socketio.emitDown('gone'); // nats stays up
     await vi.advanceTimersByTimeAsync(150);
     expect(kernel.phase.kind).toBe('online');
 
-    await vi.advanceTimersByTimeAsync(1_000); // round 1: probe fails, but nats is up
+    await vi.advanceTimersByTimeAsync(1_000);
     expect(probe).toHaveBeenCalledTimes(1);
     expect(onHold).toHaveBeenCalledTimes(1);
     expect(kernel.phase.kind).toBe('online'); // held, not torn down
 
-    await vi.advanceTimersByTimeAsync(2_000); // re-armed with backoff, escalates again
+    await vi.advanceTimersByTimeAsync(2_000); // re-armed with backoff
     expect(probe).toHaveBeenCalledTimes(2);
     expect(kernel.phase.kind).toBe('online');
     detach();
@@ -153,7 +153,7 @@ describe('attachDegradedRecovery', () => {
     const { kernel, socketio, nats, onHold, detach } = await setupPair(['failed']);
 
     socketio.emitDown('gone');
-    nats.emitDown('gone'); // both down → genuinely unreachable
+    nats.emitDown('gone');
     await vi.advanceTimersByTimeAsync(150);
     expect(kernel.phase.kind).toBe('online');
 

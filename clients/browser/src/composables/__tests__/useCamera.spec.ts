@@ -13,7 +13,6 @@ function timeout(): Error {
   return Object.assign(new Error('RPC call to "rpc.camera.cam-1.controller.rpc" timed out after 10000ms'), { code: 'TIMEOUT' });
 }
 
-// what the rpc lib throws when nobody serves the subject, e.g. a server without the method
 function noResponders(): Error {
   return Object.assign(new Error("no responders: 'rpc.camera.cam-1.controller.rpc.snapshotWithMeta'"), { name: 'NoResponders' });
 }

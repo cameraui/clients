@@ -176,11 +176,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   }
 
   function notifyClient(): void {
-    // Surface only when actually connected. Internal nats-lib reconnect
-    // keeps the same `proxy` reference alive across drops, so a passive
-    // `fn(proxy)` would never let listeners observe the drop/recovery
-    // transition. Listeners get `null` while we're down and the live
-    // client when we're up.
+    // the lib keeps the proxy alive across reconnects, listeners must see null while down
     const next = status.up ? proxy : null;
     for (const fn of [...clientListeners]) {
       try {
@@ -235,9 +231,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
             if (resolveServers) refreshPool(p);
             break;
           case 'staleConnection':
-            // Heartbeat detected silent failure. Library should follow up with
-            // disconnect but the transport-close path can be slow / silent on
-            // truly-dead sockets — treat staleConnection as authoritative.
+            // the close path can be slow or silent on dead sockets, stale is authoritative
             markDown('staleConnection');
             notifyClient();
             break;
@@ -247,16 +241,15 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
         }
       }
     })().catch(() => {
-      // iterator closes on disconnect — expected
+      // the iterator closes on disconnect
     });
   }
 
-  // server -ERR statuses carry only `error`, older clients only `data`
   function handleErrorEvent(event: { error?: unknown; data?: unknown }): void {
+    // server -ERR statuses carry only `error`, older clients only `data`
     const payload = event.error ?? event.data;
     const message = stringifyError(payload ?? 'server error');
-    // per-subject permission violations don't kill the connection — marking
-    // down would brick a healthy socket with no reconnect event to revive it
+    // permission violations don't kill the connection, marking down would brick a healthy socket
     if (message.toLowerCase().includes('permissions violation')) {
       logger?.warn(`permission violation (connection stays up): ${message}`);
       return;
@@ -311,7 +304,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       try {
         proxy.abortClose();
       } catch {
-        // ignore — closing a half-dead client; nothing actionable
+        // ignore
       }
       proxy = null;
       markDown('endpoint-changed');
@@ -335,7 +328,6 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     }
   }
 
-  // true once connected or superseded, false asks for another attempt, a throw means parked or crashed
   async function dialOnce(target: ConnectionTarget, epoch: number, signal: AbortSignal): Promise<boolean> {
     const t0 = Date.now();
     let settle!: () => void;
@@ -469,10 +461,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       return;
     }
 
-    // Token-only change: update server-list. Live connection keeps the old
-    // token (server only validates at handshake); the new token applies at
-    // the next natural reconnect. This matches the existing managed.ts
-    // behaviour and avoids gratuitous disconnects on every refresh.
+    // the server checks the token only at handshake, the new one applies at the next reconnect
     const p = proxy;
     const newServers = await serversFor(target);
     if (epoch !== applyEpoch) return;
@@ -486,10 +475,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   }
 
   function health(): TransportStatus {
-    // A connection frozen while backgrounded keeps reporting up until its
-    // throttled heartbeat timer fires. The client's wall-clock staleness check
-    // surfaces the dead socket immediately, so callers acting on resume (the
-    // kernel's nats-recovery, phase gating) don't trust a zombie.
+    // a socket frozen in background reports up until its throttled heartbeat fires, the wall-clock check catches it
     if (status.up && proxy?.isStale && Date.now() > probedUntil) {
       return { up: false, lastError: 'staleConnection' };
     }
@@ -522,8 +508,6 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
   }
 
   function getClient(): RPCClient | null {
-    // Same gating as notifyClient: while down, consumers must see null even
-    // though the lib-internal reconnect keeps the proxy reference alive.
     return status.up ? proxy : null;
   }
 
@@ -564,8 +548,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     const run = async (): Promise<TransportStatus> => {
       if (disposed || !currentTarget || parked) return health();
       if (!proxy) {
-        // a dial that just started is likely still good, after that a wake
-        // skips the backoff and dials fresh instead
+        // a dial that just started is likely still good, after that a wake skips the backoff and dials fresh
         const attempt = dialAttempt;
         if (attempt && Date.now() - attempt.startedAt < DIAL_GRACE_MS) {
           await attempt.settled;

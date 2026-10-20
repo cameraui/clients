@@ -50,9 +50,7 @@ export function createKernel(options: KernelOptions): Kernel {
         }
         if (after !== prev) {
           current = after;
-          // Snapshot + per-listener try/catch: a throw in one subscriber must
-          // not cut off downstream effects (e.g., the workerBridge listener
-          // attached last would silently miss broadcasts).
+          // a throw in one listener must not cut off the listeners after it
           for (const listener of [...listeners]) {
             try {
               listener(after, prev, next);

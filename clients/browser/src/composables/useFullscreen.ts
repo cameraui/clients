@@ -90,8 +90,6 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
     (fullscreenRoot ?? document.body).appendChild(wrapper);
     wrapper.appendChild(el);
 
-    // Stop the body underneath from scrolling/bouncing. The wrapper itself
-    // has its own scroll behavior in 'scroll' mode.
     document.body.style.overflow = 'hidden';
     document.documentElement.style.overflow = 'hidden';
     // overlays inside the wrapper position themselves in page coordinates, the fixed wrapper starts at the viewport top

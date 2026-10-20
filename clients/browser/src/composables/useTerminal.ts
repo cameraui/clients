@@ -112,10 +112,7 @@ export function useTerminal(): UseTerminalReturn {
         options?.onError?.(error.value);
       }
     } finally {
-      // Only flip state for the active generation. The endpoint-changed
-      // handler bumps streamGen before recovery starts; a stale finalizer
-      // here would otherwise set isConnected=false right after the
-      // recovery path already set it to true on the new client.
+      // a stale finalizer would clear isConnected after recovery set it on the new client
       if (gen === streamGen && !streamAbortController?.signal.aborted) {
         isConnected.value = false;
         closeRemote(sid);

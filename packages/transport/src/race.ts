@@ -68,8 +68,7 @@ export function raceFirst<T>(candidates: readonly RaceCandidate<T>[], options: R
     function cleanupAllExcept(except: AbortController | null): void {
       for (const t of timers) clearTimeout(t);
       for (const a of abortControllers) {
-        // reason lets candidate wrappers tell "race already settled" apart
-        // from "own timer fired" when labeling the rejection
+        // the reason tells candidate wrappers a settled race apart from their own timeout
         if (a !== except) a.abort('race-settled');
       }
     }
@@ -132,10 +131,6 @@ export function raceFirst<T>(candidates: readonly RaceCandidate<T>[], options: R
               return;
             }
           }
-          // Distinguish self-timeout (per-candidate signal) from parent-abort
-          // and from genuine errors — the consumer of `RaceFirstError.cause`
-          // can introspect more, but at this layer a timeout is just another
-          // failure that disqualifies the candidate.
           const isTimeout = ctrl.signal.aborted && !parentSignal?.aborted;
           const finalErr = isTimeout ? new RaceFirstError(`timeout (${delay}ms)`, cand.endpoint, err, 'all-failed') : err;
           lastErrors.set(cand.endpoint, finalErr);
@@ -147,10 +142,7 @@ export function raceFirst<T>(candidates: readonly RaceCandidate<T>[], options: R
 
           remaining--;
           if (remaining <= 0) {
-            // Representative error pick: skip vanilla timeout envelopes, then
-            // prefer causes the caller ranks informative (probeLoop uses this
-            // to keep canceled-request noise from masking a real failure),
-            // otherwise first usable in iteration order.
+            // skip bare timeouts so the reported cause is a real failure
             const usable = [...lastErrors.entries()].filter(([, e]) => {
               if (e instanceof RaceFirstError) return e.kind !== 'all-failed' || !(e.cause instanceof Error && e.cause.message === 'aborted');
               return true;

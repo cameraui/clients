@@ -16,7 +16,6 @@ function rpcError(code: string, message: string): Error {
   return Object.assign(new Error(message), { code });
 }
 
-// shape of the nats NoRespondersError the lib throws once its own retries are spent
 function noResponders(): Error {
   return Object.assign(new Error("no responders: 'rpc.camera.cam-1.controller.rpc.refreshStates'"), { name: 'NoResponders' });
 }

@@ -127,7 +127,7 @@ describe('createConnectionSignal', () => {
       socketio.emitDown('gone');
       nats.emitDown('gone');
       await vi.advanceTimersByTimeAsync(1_100);
-      // channel death is a signal concern only — the session phase holds
+      // channel death is a signal concern only, the session phase holds
       expect(kernel.phase.kind).toBe('online');
       expect(handle.current.kind).toBe('degraded');
       handle.dispose();

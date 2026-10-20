@@ -291,7 +291,7 @@ describe('createWsTransport — apply lifecycle', () => {
     handle.on('close', () => handle.dispose());
 
     await t.apply(T2);
-    // handle was disposed mid-recycle — only the original socket exists
+    // the handle was disposed mid-recycle, only the original socket exists
     expect(instances()).toHaveLength(1);
     expect(t.handleCount).toBe(0);
   });

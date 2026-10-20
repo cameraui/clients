@@ -75,7 +75,7 @@ describe('attachTransportSync — phase transitions', () => {
     const tokens = tokensWith('at-0');
     kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens });
 
-    // initial idle → null, BOOT → discovering (skipped), PROBE → online with target
+    // idle applies null, discovering is skipped
     expect(http.applyCalls).toEqual([null, { endpoint: LAN, tokens }]);
   });
 
@@ -87,7 +87,6 @@ describe('attachTransportSync — phase transitions', () => {
 
     expect(http.applyCalls).toEqual([target]);
 
-    // New AT → new target → apply fires.
     const refreshed = { ...target.tokens, access: 'at-1' };
     kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: refreshed });
 
@@ -136,12 +135,12 @@ describe('attachTransportSync — phase transitions', () => {
     const http = new FakeTransport({ spec: SPECS.get('http')! });
     attachTransportSync({ kernel, transports: [http] });
 
-    // online → needs-auth → discovering. Needs-auth tears down. Discovering hold-state — no new apply.
+    // needs-auth tears down
     kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'bad' });
     expect(http.applyCalls).toEqual([target, null]);
 
     kernel.dispatch({ type: 'BOOT', instanceId: 'b' });
-    expect(http.applyCalls).toEqual([target, null]); // discovering = skip
+    expect(http.applyCalls).toEqual([target, null]); // discovering applies nothing
 
     kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: target.tokens });
     expect(http.applyCalls).toHaveLength(3);
@@ -293,8 +292,7 @@ describe('attachTransportSync — per-transport rollback and retry', () => {
       attachTransportSync({ kernel, transports: [socketio], retryMs: 1_000 });
       await flush();
 
-      // discovering is only reachable via offline now — the null apply on
-      // offline is expected teardown, the retry then idles through discovering
+      // discovering is only reachable via offline, its null apply is the expected teardown
       kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'down' });
       await flush();
       kernel.dispatch({ type: 'USER_RETRY' });

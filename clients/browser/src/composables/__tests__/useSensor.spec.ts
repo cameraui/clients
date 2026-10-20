@@ -73,7 +73,6 @@ function fakeRpc(sensors: typeof SENSORS = SENSORS) {
     return Object.fromEntries(sensors.filter((s) => !offline.has(s.id)).map((s) => [s.id, { type: s.type, properties: { ...values.get(s.id) }, capabilities: [] }]));
   }
 
-  // a change the client misses, e.g. while its link is down
   function seed(sensorId: string, properties: Record<string, unknown>): void {
     values.set(sensorId, { ...values.get(sensorId), ...properties });
   }
@@ -83,8 +82,8 @@ function fakeRpc(sensors: typeof SENSORS = SENSORS) {
     emit(`sensor.${sensorId}.subject`, { type: 'property:changed', data: { sensorId, property, value, timestamp: Date.now() } });
   }
 
-  // a returning plugin seeds its values without property events
   function setConnected(sensorId: string, connected: boolean, seeded: Record<string, unknown> = {}): void {
+    // a returning plugin seeds its values without property events
     values.set(sensorId, { ...values.get(sensorId), ...seeded });
     if (connected) offline.delete(sensorId);
     else offline.add(sensorId);

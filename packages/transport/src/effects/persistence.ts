@@ -70,10 +70,7 @@ export function attachPersistence(options: PersistenceOptions): Persistence {
       }
     }
     if (detached) return;
-    // Don't clobber the cache if an external seed() / persist() landed
-    // between attach and this async storage.get resolving. The freshest
-    // writer wins — restore is only authoritative when nothing else has
-    // populated cache yet.
+    // a seed() or persist() that landed during the async read is fresher than storage
     if (cached !== null) {
       options.onRestore?.(cached);
       return;
@@ -124,8 +121,7 @@ export function attachPersistence(options: PersistenceOptions): Persistence {
 
   const unsub = options.kernel.subscribe((next, prev) => {
     if (detached) return;
-    // tokens rotated mid-probe or after the drop: single-use refresh tokens
-    // make losing this write a forced logout on the next boot
+    // tokens rotated mid-probe or after the drop: single-use refresh tokens make losing this write a forced logout
     const pending = pendingTokensOf(next);
     if (pending && pending !== pendingTokensOf(prev)) {
       if (cached) persist({ endpoint: cached.endpoint, tokens: pending });

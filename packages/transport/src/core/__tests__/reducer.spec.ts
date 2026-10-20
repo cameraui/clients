@@ -219,9 +219,7 @@ describe('reducer — TOKENS_REFRESHED', () => {
     const online = onlinePhase();
     const sameTokens: Tokens = { ...TOKENS };
     const next = reducer(online, { type: 'TOKENS_REFRESHED', tokens: sameTokens }, ctx);
-    // Identity equality — kernel uses `after !== prev` to decide whether to
-    // notify listeners. This guarantees no cross-tab/persistence ping-pong
-    // when both sides converge on the same tokens.
+    // the kernel notifies only when after !== prev
     expect(next).toBe(online);
   });
 

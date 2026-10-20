@@ -142,9 +142,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
       }
       if (closeDelivered.has(ws)) return;
       closeDelivered.add(ws);
-      // A stale socket (recycleAll already opened a replacement on this
-      // handle) must not deliver its close — the consumer would tear down
-      // the fresh connection thinking the current one died.
+      // a replaced socket must not deliver its close, the consumer would tear down the fresh one
       if (!isCurrent) return;
       logger?.debug(`close ${handle.spec.path} code=${event.code} clean=${event.wasClean}${event.reason ? ` reason=${event.reason}` : ''}`);
       if (isAuthCloseEvent(event)) {
@@ -170,17 +168,15 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
     if (!ws) return;
     const Ctor = ensureCtor();
     if (ws.readyState === Ctor.OPEN || ws.readyState === Ctor.CONNECTING) {
-      // Native onclose drives the close-event delivery so we don't double-fire.
+      // the native onclose delivers the close event
       try {
         ws.close(code, reason);
       } catch {
-        // closing a half-dead socket — nothing actionable
+        // ignore
       }
       return;
     }
-    // Socket already gone — synthesize a close so listeners learn about it.
-    // A CLOSING socket still fires its native onclose later; closeDelivered
-    // makes sure listeners see exactly one close per socket.
+    // a CLOSING socket still fires its native onclose later, closeDelivered keeps it to one close
     if (handle.ws === ws) {
       handle.ws = null;
       handle.url = null;
@@ -253,7 +249,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
   }
 
   function recycleAll(code: number, reason: string): void {
-    // Snapshot first — `close` listeners may dispose their handle (mutates `handles`).
+    // close listeners may dispose their handle
     const snapshot = [...handles];
     logger?.debug(`recycleAll (${reason}) handles=${snapshot.length}`);
     for (const handle of snapshot) {
@@ -264,7 +260,6 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
       emitter.emit('down', { reason });
     }
     if (!currentTarget) return;
-    // Re-open every handle that's still alive after the close-event callbacks.
     for (const handle of handles) {
       if (!handle.disposed) openWs(handle);
     }
@@ -278,7 +273,7 @@ export function createWsTransport(options: WsTransportOptions = {}): WsTransport
     currentTarget = target;
 
     if (!target) {
-      // Snapshot — `close` callbacks may dispose their handle.
+      // close listeners may dispose their handle
       const snapshot = [...handles];
       for (const handle of snapshot) {
         closeWs(handle, WS_CLOSE_DETACHED, 'detached');

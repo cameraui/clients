@@ -13,9 +13,9 @@ function fakeStream(initialMode: CameraActivityMode, { playsOnStart = true } = {
     playing = false;
   });
   const activity = createActivityMode({ initialMode, onStreamStart, onStreamStop, isStreamPlaying: () => playing });
-  // useCameraStream re-arms the idle timer when the first frame plays
   function firstFrame() {
     playing = true;
+    // useCameraStream re-arms the idle timer when the first frame plays
     activity.resetIdleTimer();
   }
   return { activity, onStreamStart, onStreamStop, firstFrame };

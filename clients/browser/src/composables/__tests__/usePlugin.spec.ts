@@ -44,7 +44,6 @@ function timeOut(ms = 10_000): Promise<never> {
   return new Promise((_resolve, reject) => setTimeout(() => reject(Object.assign(new Error('timed out'), { code: 'TIMEOUT' })), ms));
 }
 
-// a half-open socket: the client still says connected, nothing comes back
 function goDead(lane: ReturnType<typeof fakeClient>): void {
   lane.previewFrames.mockImplementation(() => timeOut());
   lane.camera.snapshotWithMeta.mockImplementation(() => timeOut());

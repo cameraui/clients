@@ -164,16 +164,13 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
     }, delayMs);
   }
 
-  // resolves true when the kernel holds a new access token or a retry for one is scheduled
   async function triggerRefresh(reason: RefreshReason): Promise<boolean> {
     if (detached) {
       options.onTriggerSkipped?.(reason, 'detached', options.kernel.phase.kind);
       return false;
     }
     if (inflight) {
-      // Don't drop auth-error triggers — queue at most one and re-fire after
-      // the current refresh settles. Proactive triggers can drop safely (the
-      // scheduler will requeue them on the next success/expiry cycle).
+      // queue one auth-error trigger, proactive ones can drop since the scheduler requeues them
       if (reason === 'auth-error') pendingAuthError = true;
       options.onTriggerSkipped?.(reason, 'already-inflight', options.kernel.phase.kind);
       return inflight;
@@ -194,26 +191,14 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
 
     try {
       let result = await underRefreshLock(async (): Promise<RefreshOutcome> => {
-        // Inside the lock: another tab may have refreshed while we were
-        // waiting for it. Re-read the freshest known tokens (typically from
-        // localStorage via attachPersistence) and skip the HTTP call if
-        // they need no refresh.
+        // another tab may have refreshed while we waited for the lock
         const fresh = options.getLatestTokens?.();
         if (fresh && needsNoRefresh(fresh)) {
-          // Dispatch INSIDE the lock so attachPersistence's storage write
-          // completes before we release. Otherwise the next tab acquires the
-          // lock before our localStorage entry is visible cross-tab → its
-          // getLatestTokens reads stale tokens → it sends a redundant (and
-          // potentially failing) refresh.
+          // inside the lock, so the next tab sees the stored tokens before it gets the lock
           options.kernel.dispatch({ type: 'TOKENS_REFRESHED', tokens: fresh });
           return { tokens: fresh, skipped: true };
         }
-        // The `target` captured before the lock can be stale by now: another
-        // tab may have rotated the refresh token while we waited (rotation
-        // invalidates the old one server-side → refreshing with it forces a
-        // logout). Refresh with the freshest tokens visible — persistence
-        // (`fresh`) beats the pre-lock snapshot, the live phase beats the
-        // captured one.
+        // another tab may have rotated the refresh token while we waited, refreshing with the old one forces a logout
         const livePhase = options.kernel.phase;
         const liveTarget = livePhase.kind === 'online' ? livePhase.target : null;
         const base = liveTarget ?? target;
@@ -240,10 +225,7 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
       tokenComing = live.kind === 'online' && live.target.tokens.access !== target.tokens.access;
       if (result.skipped) {
         options.onRefreshSkipped?.(reason, result.tokens);
-        // The dispatch inside the lock is a reducer no-op when the tokens are
-        // identical — no phase change, so the kernel subscriber never re-arms
-        // the proactive timer. Re-arm explicitly or the next refresh would
-        // only ever happen reactively via auth-error.
+        // identical tokens are a reducer no-op, nothing else re-arms the proactive timer
         const p = options.kernel.phase;
         if (p.kind === 'online' && timer === undefined) {
           schedule(p.target);
@@ -254,9 +236,7 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
     } catch (err) {
       if (detached) return false;
       const transient = lockTimedOut || isTransient(err);
-      // a server error (5xx) is still transient (→ offline, not needs-auth) but
-      // gets the smaller server-error budget: retrying the token refresh can't
-      // fix a down server, so give up quickly and let re-discovery take over.
+      // a 5xx stays transient but gets the smaller budget, retrying can't fix a down server
       const serverError = transient && isServerError(err);
       const budget = serverError ? maxServerErrorRetries : maxTransientRetries;
       if (transient && transientRetries < budget) {
@@ -276,16 +256,12 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
         transientRetries = 0;
         slowRetries = 0;
         options.onRefreshError?.(reason, err, { transient, serverError, retriesLeft: 0, willRetry: false });
-        // Tag with the original transience: server-side rejection (401 etc)
-        // → needs-auth; transient give-up (network / 5xx) → offline → rediscover.
         options.kernel.dispatch({ type: 'TOKENS_INVALID', reason: stringifyError(err), transient });
       }
     } finally {
       inflight = null;
       settle(tokenComing);
-      // Drain a queued auth-error trigger if one arrived during this attempt.
-      // We do this *outside* the inflight guard so the follow-up runs normally;
-      // it'll early-return again if a transient retry has set inflight back.
+      // outside the inflight guard so the queued auth-error runs normally
       if (!detached && pendingAuthError) {
         pendingAuthError = false;
         triggerOnAuthError();
@@ -356,10 +332,6 @@ export function attachTokenLifecycle(options: TokenLifecycleOptions): TokenLifec
       options.onWakeChecked?.({ decision: 'no-expiry', phase: phase.kind });
       return;
     }
-    // Identical predicate to schedule(): if there's less than graceMs left
-    // (or we're past expiry), kick off a refresh now. Otherwise the existing
-    // scheduled timer (or a freshly rescheduled one) handles it — wake() is
-    // a no-op.
     const remaining = exp - now();
     if (remaining < graceMs && insideRefreshFloor()) {
       options.onWakeChecked?.({ decision: 'throttled', remainingMs: remaining, phase: phase.kind });

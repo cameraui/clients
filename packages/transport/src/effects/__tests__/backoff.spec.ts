@@ -60,14 +60,11 @@ describe('attachBackoff — exponential / capped schedule', () => {
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled });
 
-    // Cycle 1: offline → discovering → offline → discovering ...
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
     expect(onScheduled).toHaveBeenLastCalledWith(1, 5_000);
 
-    // Fire first
     vi.advanceTimersByTime(5_001);
-    // USER_RETRY → discovering → fail → offline
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
     expect(onScheduled).toHaveBeenLastCalledWith(2, 10_000);
 
@@ -115,21 +112,17 @@ describe('attachBackoff — cancel + reset', () => {
     const onScheduled = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled });
 
-    // Climb to attempt 2 (USER_RETRY auto-fires after timer)
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
-    vi.advanceTimersByTime(5_001); // fires USER_RETRY → discovering
+    vi.advanceTimersByTime(5_001); // fires USER_RETRY
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
     expect(onScheduled.mock.calls.map((c) => c[1])).toEqual([5_000, 10_000]);
 
-    // Succeed: USER_RETRY back to discovering, then PROBE_SUCCEEDED → online
     kernel.dispatch({ type: 'USER_RETRY' });
     kernel.dispatch({ type: 'PROBE_SUCCEEDED', endpoint: LAN, tokens: TOKENS });
     expect(kernel.phase.kind).toBe('online');
 
-    // Restart a fresh cycle (logout + boot) — counter must reset to first
-    // entry. TOKENS_INVALID no longer routes through offline (now lands in
-    // needs-auth without backoff), so we exercise the reset via RESET + BOOT.
+    // TOKENS_INVALID goes to needs-auth without backoff, so restart via RESET + BOOT
     kernel.dispatch({ type: 'RESET' });
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
@@ -166,25 +159,20 @@ describe('attachBackoff — BACKOFF_HINT', () => {
     const onHintApplied = vi.fn();
     attachBackoff({ kernel, schedule, onScheduled, onHintApplied });
 
-    // Enter offline — initial schedule = 5s.
     kernel.dispatch({ type: 'BOOT', instanceId: 'a' });
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
     expect(onScheduled).toHaveBeenLastCalledWith(1, 5_000);
     expect(onHintApplied).not.toHaveBeenCalled();
 
-    // Server says "actually wait 30s, I'm in maintenance".
     kernel.dispatch({ type: 'BACKOFF_HINT', retryAfterMs: 30_000, source: 'tunnel-503' });
 
-    // Backoff reschedules to honor the longer wait.
     expect(onScheduled).toHaveBeenLastCalledWith(1, 30_000);
     expect(onHintApplied).toHaveBeenCalledWith(30_000, 'tunnel-503');
 
-    // After 5s — no fire (we're waiting 30s now).
     vi.advanceTimersByTime(5_500);
     if (kernel.phase.kind !== 'offline') throw new Error('expected offline');
     expect(kernel.phase.kind).toBe('offline');
 
-    // After 30s total — fires USER_RETRY.
     vi.advanceTimersByTime(25_000);
     expect(kernel.phase.kind).toBe('discovering');
   });
@@ -200,11 +188,8 @@ describe('attachBackoff — BACKOFF_HINT', () => {
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'x' });
     expect(onScheduled).toHaveBeenLastCalledWith(1, 60_000);
 
-    // Server hint says "retry in 5s" — but our local schedule says 60s.
-    // We never shorten. Reducer keeps the existing (later) nextRetryAt.
     kernel.dispatch({ type: 'BACKOFF_HINT', retryAfterMs: 5_000 });
 
-    // No reschedule call — the hint didn't extend anything.
     expect(onScheduled).toHaveBeenCalledTimes(1);
     expect(onHintApplied).not.toHaveBeenCalled();
   });
@@ -268,7 +253,6 @@ describe('attachBackoff — firstAttemptDelayMs', () => {
     vi.advanceTimersByTime(1_500);
     expect(dispatchSpy).toHaveBeenCalledWith({ type: 'USER_RETRY' });
 
-    // Second offline entry (retry failed) — hook no longer applies.
     kernel.dispatch({ type: 'PROBE_FAILED_ALL', error: 'still down' });
     expect(onScheduled).toHaveBeenLastCalledWith(2, 5_000);
   });

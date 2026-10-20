@@ -81,8 +81,6 @@ describe('attachPersistence — clear on logout, keep on offline', () => {
     kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'expired', transient: true });
     await flushMicrotasks();
 
-    // phase is now offline — credentials should still be there for the next
-    // probe round to attempt with.
     expect(await storage.get('camera.ui:transport:target')).not.toBeNull();
   });
 });
@@ -296,7 +294,7 @@ describe('attachPersistence — peek()', () => {
     const kernel = createKernel({ context: makeCtx() });
     const { peek } = attachPersistence({ kernel, storage: asyncStorage });
 
-    // Synchronously called before microtasks flush — cache is still empty.
+    // the async read has not settled yet
     expect(peek()).toBeNull();
   });
 
@@ -366,7 +364,6 @@ describe('attachPersistence — peek()', () => {
     const { peek } = attachPersistence({ kernel, storage });
     await flushMicrotasks();
 
-    // Network drop → offline. Cache must survive for backoff USER_RETRY.
     kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'bad', transient: true });
     await flushMicrotasks();
 
@@ -394,7 +391,7 @@ describe('attachPersistence — seed()', () => {
 
     const promise = seed(TARGET);
 
-    // Cache is updated before the async storage write resolves.
+    // the cache updates before the async write resolves
     expect(peek()).not.toBeNull();
     expect(peek()!.endpoint).toEqual(LAN);
 
@@ -415,9 +412,6 @@ describe('attachPersistence — seed()', () => {
 
     await seed(TARGET);
 
-    // Probe-loop's lastTarget callback would peek() during the next USER_RETRY
-    // and find the seeded target — driving probe to hit /auth/check instead
-    // of throwing needs-auth.
     expect(peek()).not.toBeNull();
     expect(peek()!.tokens).toEqual(TOKENS);
   });
@@ -447,7 +441,7 @@ describe('attachPersistence — pendingTokens during discovering', () => {
     const persistence = attachPersistence({ kernel, storage, key: 'k' });
     await persistence.seed(target);
 
-    // discovering is only reachable via offline now
+    // discovering is only reachable via offline
     kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'net', transient: true });
     kernel.dispatch({ type: 'USER_RETRY' });
     expect(kernel.phase.kind).toBe('discovering');

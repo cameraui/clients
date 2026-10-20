@@ -153,8 +153,7 @@ function getSensorStorageKey(pluginId: string, sensorId: string): string {
 }
 
 function acquireStorage(key: string, client: RPCClient, createProxy: () => Promisify<StorageRPC>): ReactiveStorage {
-  // a proxy answers only on the client it was created on, an entry left over
-  // from a rebuilt connection would fail every call
+  // a proxy answers only on the client it was created on, a leftover from a rebuilt connection fails every call
   const cached = storageCache.get(key);
   if (cached && cached.client !== client) storageCache.forceRelease(key);
   return storageCache.acquire(key, () => createReactiveStorage(createProxy(), client));
@@ -261,7 +260,6 @@ function createStorageOperations(
     }
   }
 
-  // the first failure shows at once and the retries after it run quietly, the promise settles with the final outcome
   function getConfig(): Promise<SchemaConfig | undefined> {
     if (!state.cachedStorage) return Promise.resolve(undefined);
     if (status) ensureStatusSubscription(status.rpc);
@@ -273,6 +271,7 @@ function createStorageOperations(
     if (load.storage !== state.cachedStorage) {
       clearTimeout(load.timer);
       load.timer = undefined;
+      // the first failure shows at once, the retries after it run quietly, the promise settles with the final outcome
       attempt(load, true);
     }
     return load.result;
@@ -482,8 +481,7 @@ export function usePluginStorage(pluginName: MaybeRefOrGetter<string>): UseStora
 
   watch([clientConnected, () => toValue(pluginName)], sync, { immediate: true });
 
-  // a short drop never flips clientConnected, the storage still needs the
-  // possibly rebuilt client and a fresh config
+  // a short drop never flips clientConnected, the storage still needs the possibly rebuilt client and a fresh config
   cameraUi.on('reconnected', sync);
 
   tryOnScopeDispose(() => {

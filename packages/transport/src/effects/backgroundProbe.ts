@@ -65,8 +65,7 @@ export function createBackgroundProbe(options: BackgroundProbeOptions): Backgrou
       }
       const current = phase.target.endpoint;
       const same = current.url === endpoint.url && current.mode === endpoint.mode;
-      // a swap rebuilds every channel and stream, so a healthy target only moves to a preferred path.
-      // right after a network switch the race can also misfire while the new interface is still settling
+      // swaps rebuild every channel and the race can misfire after a network switch, so a healthy target only moves to a preferred path
       const preferredWinner = options.prefer?.(endpoint) ?? false;
       const preferredCurrent = options.prefer?.(current) ?? false;
       if (!same && options.isCurrentHealthy?.() === true && !(preferredWinner && !preferredCurrent)) {

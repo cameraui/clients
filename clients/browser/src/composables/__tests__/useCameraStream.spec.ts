@@ -198,7 +198,6 @@ function observerOf(container: FakeElement): FakeIntersectionObserver {
   return observer;
 }
 
-// the first observer report follows mounting, like in a browser
 async function mountTile(options: Partial<UseCameraStreamOptions> & { visible?: boolean; connected?: Ref<boolean> } = {}) {
   const { visible = true, connected = ref(true), ...streamOptions } = options;
   const app = createApp({});
@@ -222,6 +221,7 @@ async function mountTile(options: Partial<UseCameraStreamOptions> & { visible?: 
     await nextTick();
   }
 
+  // the first observer report follows mounting, like in a browser
   await scroll(visible);
   return { tile, container, stream, video: video!, scroll };
 }

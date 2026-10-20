@@ -51,7 +51,7 @@ async function setMicTrack(micTransceiver: RTCRtpTransceiver | null, signal: Abo
   try {
     await micTransceiver.sender.replaceTrack(track);
   } catch {
-    // Ignore errors
+    // ignore
   }
 }
 

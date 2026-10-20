@@ -99,7 +99,7 @@ export function attachWorkerBridge(options: WorkerBridgeOptions): WorkerBridge {
   function maybeAttachHostListener(host: WorkerHost): void {
     if (!options.listenForResyncRequests && !options.resolveServers) return;
     if (!host.addEventListener) return;
-    if (hostListenerCleanups.has(host)) return; // already wired
+    if (hostListenerCleanups.has(host)) return;
     const listener = (event: MessageEvent<WorkerMessage>): void => {
       if (detached) return;
       const msg = event.data;

@@ -23,7 +23,6 @@ const ONLINE_PHASE: ConnectionPhase = {
 const IDLE_PHASE: ConnectionPhase = { kind: 'idle' };
 
 function fireStorage(source: EventTarget, key: string, newValue: string | null): void {
-  // Synthetic StorageEvent shape — only the keys we use.
   const event = new Event('storage') as Event & { key: string; newValue: string | null };
   (event as { key: string }).key = key;
   (event as { newValue: string | null }).newValue = newValue;
@@ -53,8 +52,6 @@ describe('attachCrossTab — TOKENS_REFRESHED forwarding', () => {
     const kernel = createKernel({ context: makeCtx(), initial: ONLINE_PHASE });
     attachCrossTab({ kernel, source });
 
-    // Other tab might've persisted a different endpoint (e.g. tunnel/check
-    // re-ran and picked a different LAN address). Our local endpoint stays.
     fireStorage(source, 'camera.ui:transport:target', jsonTarget({ endpoint: WAN, tokens: TOKENS_NEW }));
 
     if (kernel.phase.kind !== 'online') throw new Error('expected online');
@@ -146,8 +143,6 @@ describe('attachCrossTab — filtering + error handling', () => {
 
     fireStorage(source, 'camera.ui:transport:target', jsonTarget({ endpoint: LAN, tokens: TOKENS_NEW }));
 
-    // No kernel dispatch — but the persistence cache is updated and the app
-    // notified so it can retry from a dead-end phase with the fresh tokens.
     expect(kernel.phase.kind).toBe('idle');
     expect(absorb).toHaveBeenCalledWith({ endpoint: LAN, tokens: TOKENS_NEW });
     expect(onTokensReceived).toHaveBeenCalledWith(TOKENS_NEW);

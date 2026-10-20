@@ -178,8 +178,7 @@ export function useRpcSubscription(subscribeFn: (rpc: RPCClient) => Promise<() =
         try {
           unsubscribe();
         } catch {
-          // Old subscription dead — that's expected when the RPCClient has
-          // been rebuilt; the unsubscribe handle won't reach anything.
+          // expected once the client was rebuilt
         }
         unsubscribe = undefined;
       }
@@ -205,10 +204,7 @@ export function useRpcSubscription(subscribeFn: (rpc: RPCClient) => Promise<() =
       }
     } finally {
       pending = false;
-      // A newer RPCClient may have arrived while this bind was in flight —
-      // the watch's bind() call was dropped by the pending guard. Without
-      // this rebind the subscription would stay dead until the NEXT
-      // reconnect.
+      // a client that arrived while this bind was in flight had its bind dropped by the pending guard
       const current = ctx.rpc.value;
       if (!disposed && ctx.isConnected.value && current && current !== boundClient) {
         bind(current);

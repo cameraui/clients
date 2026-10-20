@@ -31,7 +31,7 @@ describe('attachProbeLoop — race semantics', () => {
           lanResolve = res;
         });
       }
-      // WAN never resolves on its own — only via abort
+      // WAN settles only via abort
       return new Promise((_, rej) => {
         ctx.signal.addEventListener('abort', () => {
           wanAborted = true;
@@ -80,7 +80,7 @@ describe('attachProbeLoop — per-mode timeout', () => {
   it('per-probe timeout aborts the probe and surfaces as transient', async () => {
     let lanGotTimeoutAbort = false;
     const probe = vi.fn<ProbeFn>(async (ctx) => {
-      // Never resolves; should be aborted by the per-probe timeout
+      // settles only via the per-probe timeout
       return new Promise((_, rej) => {
         ctx.signal.addEventListener('abort', () => {
           if (ctx.endpoint.url === LAN.url) lanGotTimeoutAbort = true;
@@ -97,7 +97,7 @@ describe('attachProbeLoop — per-mode timeout', () => {
       discover,
       probe,
       onProbeError,
-      timeoutByMode: () => 20, // tight for the test
+      timeoutByMode: () => 20,
     });
 
     await vi.waitFor(() => expect(kernel.phase.kind).toBe('offline'));
@@ -129,7 +129,7 @@ describe('attachProbeLoop — per-mode timeout', () => {
     const start = Date.now();
     await vi.waitFor(() => expect(kernel.phase.kind).toBe('offline'), { timeout: 1_000 });
     const elapsed = Date.now() - start;
-    // We waited for WAN's timeout, not just LAN's.
+    // waited for WAN's timeout, not only LAN's
     expect(elapsed).toBeGreaterThanOrEqual(50);
     detach();
   });
@@ -157,7 +157,6 @@ describe('attachProbeLoop — failure semantics', () => {
       if (ctx.endpoint.url === LAN.url) {
         throw makeProbeFailure('needs-auth', 'token expired');
       }
-      // WAN — will be aborted before it returns
       return new Promise((_, rej) => {
         ctx.signal.addEventListener('abort', () => {
           lanResolved = true;

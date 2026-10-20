@@ -494,9 +494,7 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
     },
 
     async setProperty(property: string, value: unknown): Promise<void> {
-      // SDK Sensor base class exposes `updateValue(property, value)` as the external write
-      // entry-point. Concrete control sensor classes (Light, Siren, Lock, etc.) override
-      // `updateValue` to dispatch to their semantic setters (`setOn`, `setActive`, ...).
+      // updateValue is the sdk sensor's external write entry, control sensors route it to their setters
       const sensorNamespace = `plugin.${data.pluginId}.sensor.${data.id}.rpc`;
       await rpcCall(rpcRef, (client) =>
         client.createProxy<{ updateValue(property: string, value: unknown): Promise<void> }>(sensorNamespace).updateValue(property, value),
@@ -566,9 +564,7 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
   const { sensorsSubject, sensorsRpc } = NamespaceManager.sensorRegistryNamespaces();
   const ctx: ReactiveCameraDeviceContext | undefined =
     'rpc' in rpcOrContext && 'value' in (rpcOrContext as ReactiveCameraDeviceContext).rpc ? (rpcOrContext as ReactiveCameraDeviceContext) : undefined;
-  // When called with a bare RPCClient (NVR consumer path), wrap it in a
-  // shallowRef so rpcCall sees a uniform reactive surface. The ref never
-  // changes value in that mode.
+  // a bare RPCClient (nvr) gets a ref that never changes, so rpcCall sees one reactive surface
   const rpcRef: ShallowRef<RPCClient | undefined> = ctx ? (ctx.rpc as ShallowRef<RPCClient | undefined>) : shallowRef<RPCClient | undefined>(rpcOrContext as RPCClient);
 
   const sensorMap = shallowRef(new Map<string, InternalReactiveSensor>());
@@ -791,7 +787,7 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
   function handleGlobalSensorEvent(message: SensorEventMessage): void {
     if (message.type === 'sensor:added') {
       const event = message.data as SensorAddedEvent;
-      // Skip if sensor already exists (race with doInit during reconnect)
+      // doInit may have added it during a reconnect
       if (sensorMap.value.has(event.sensor.id)) return;
       const reactiveSensor = createReactiveSensor(event.sensor, event.state, rpcRef);
       const newMap = new Map(sensorMap.value);
@@ -860,7 +856,7 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
     // views keep their sensor objects and lists until the new snapshot replaces them
     const previous = sensorMap.value;
 
-    // Subscribe to global events first, but queue them until the initial load is done
+    // global events queue up until the initial load is done
     let pendingEvents: SensorEventMessage[] | undefined = [];
     try {
       globalUnsubscribe = await rpcCall(rpcRef, (c) =>
@@ -909,7 +905,7 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
       throw err;
     }
 
-    // Replay queued events (only new sensors will be added, existing ones are skipped)
+    // a replayed add of a sensor the snapshot already has is skipped
     const queued = pendingEvents;
     pendingEvents = undefined;
     for (const msg of queued) {
@@ -943,9 +939,7 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
   async function reconnect(): Promise<void> {
     initialized.value = false;
     if (initPromise) {
-      // An init is already in flight — its subscriptions may sit on the OLD
-      // (dead) client. Queue a fresh init behind it so the sensor
-      // subscriptions land on the current client.
+      // the running init may sit on the old dead client, a fresh one behind it lands on the current client
       const current = initPromise;
       const run = generation;
       const p = current
@@ -1106,8 +1100,7 @@ async function ensureSensorManager(
   try {
     // watch reruns reuse the reference, a cleared cache needs a new one
     if (!holdsCachedManager(state)) {
-      // Pass the cameraUiContext so the cached manager dynamically resolves
-      // the current client, so it survives a race-winner adoption / endpoint swap.
+      // with the context the cached manager follows the current client across an endpoint swap
       state.cachedManager = acquireSharedManager(cameraUi).manager;
       state.acquired = true;
       state.liveScope = undefined;
@@ -1229,10 +1222,7 @@ export function useSensorByType(camera: CameraIdentifier, sensorType: MaybeRefOr
         sensor.value = resolveSensor();
         initialLoadDone.value = true;
       } else {
-        // Camera id flipped to undefined (caller gated the composable).
-        // Drop the cached manager so its NATS subscriptions actually stop —
-        // otherwise we'd keep streaming detection events for sensors the
-        // caller no longer wants to see.
+        // a gated camera id drops the manager so its nats subscriptions stop
         cleanupSensorComposable(state);
         cachedManager.value = undefined;
         sensor.value = undefined;
@@ -1415,10 +1405,7 @@ function useTypedSensor<T extends ReactiveSensor<any>>(
         sensor.value = resolveSensor();
         initialLoadDone.value = true;
       } else {
-        // Camera id flipped to undefined (caller gated the composable).
-        // Drop the cached manager so its NATS subscriptions actually stop —
-        // otherwise we'd keep streaming detection events for sensors the
-        // caller no longer wants to see.
+        // a gated camera id drops the manager so its nats subscriptions stop
         cleanupSensorComposable(state);
         cachedManager.value = undefined;
         sensor.value = undefined;

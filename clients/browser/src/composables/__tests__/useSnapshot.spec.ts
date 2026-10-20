@@ -69,7 +69,6 @@ function timeOut(ms = 10_000): Promise<never> {
   return new Promise((_resolve, reject) => setTimeout(() => reject(timeoutError()), ms));
 }
 
-// a half-open socket: the client still says connected, nothing comes back
 function goDead(lane: ReturnType<typeof fakeClient>): void {
   lane.controller.snapshotWithMeta.mockImplementation(() => timeOut());
   lane.controller.snapshot.mockImplementation(() => timeOut());
@@ -80,7 +79,6 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
-// how long a fetch waited, on the fake clock
 async function timed(fetching: Promise<unknown>): Promise<number> {
   const start = Date.now();
   const done = fetching.then(() => Date.now() - start);
@@ -915,7 +913,6 @@ describe('useSnapshot after a reconnect', () => {
     return { ctx, emit };
   }
 
-  // a server that tells an unchanged image apart by its exact fetch time
   function conditionalServer(rpc: ReturnType<typeof fakeClient>) {
     const stored = { data: jpeg(1), fetchedAt: 1_000 };
     rpc.controller.snapshotWithMeta.mockImplementation(async (...args: unknown[]) => {

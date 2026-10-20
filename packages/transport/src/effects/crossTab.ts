@@ -3,9 +3,7 @@ import type { ConnectionTarget } from '../core/types.js';
 
 export type Detach = () => void;
 
-export interface CrossTabSource extends EventTarget {
-  // Marker so we can be strict about what we accept.
-}
+export interface CrossTabSource extends EventTarget {}
 
 export interface CrossTabPayload {
   readonly endpoint?: ConnectionTarget['endpoint'];
@@ -40,15 +38,11 @@ export function attachCrossTab(options: CrossTabOptions): Detach {
   }
 
   function handle(event: Event): void {
-    // Browsers fire StorageEvent; tests synthesize a CustomEvent-like with the
-    // same shape. Cast and inspect defensively — duck typing.
     const e = event as StorageEvent;
     if (e.key !== key) return;
 
     if (e.newValue === null) {
-      // Another tab cleared the storage entry — i.e. RESET. Only dispatch if
-      // we currently hold a session; idle/discovering/offline just drop their
-      // cached copy so a later retry doesn't probe with revoked tokens.
+      // another tab logged out: a live session resets, the other phases only drop their cached tokens
       options.absorb?.(null);
       const k = options.kernel.phase.kind;
       if (k !== 'online') return;
@@ -57,8 +51,6 @@ export function attachCrossTab(options: CrossTabOptions): Detach {
       return;
     }
 
-    // newValue is a JSON-encoded ConnectionTarget. Take just the tokens — the
-    // endpoint stays whatever the kernel currently knows.
     let parsed: ParsedPayload;
     try {
       parsed = JSON.parse(e.newValue) as ParsedPayload;
@@ -79,8 +71,7 @@ export function attachCrossTab(options: CrossTabOptions): Detach {
     if (k !== 'online') {
       if (parsed.endpoint?.url) {
         options.absorb?.({ endpoint: parsed.endpoint, tokens: parsed.tokens });
-        // Still notify — the app may want to retry from needs-auth/idle now
-        // that fresh tokens exist (other-tab login / instance switch).
+        // still notify, the app may retry from needs-auth now that another tab logged in
         options.onTokensReceived?.(parsed.tokens);
       }
       return;

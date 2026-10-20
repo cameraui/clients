@@ -116,7 +116,7 @@ export function createActivityMode(options: CreateActivityModeOptions): Activity
             onStreamStart();
           }
         } else {
-          // Grace period prevents flicker when switching modes
+          // grace period against flicker on a mode switch
           activityTimeout = setTimeout(() => {
             if (mode.value === 'activity' && !hasActivity.value) {
               goToStandby();

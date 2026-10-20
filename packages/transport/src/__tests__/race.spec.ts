@@ -31,7 +31,7 @@ describe('raceFirst — happy paths', () => {
     const fast = deferred<string>();
 
     const candidates: RaceCandidate<string>[] = [
-      { endpoint: LAN, run: () => new Promise<string>(() => {}) /* never */ },
+      { endpoint: LAN, run: () => new Promise<string>(() => {}) },
       { endpoint: WAN, run: () => fast.promise },
     ];
 
@@ -61,7 +61,7 @@ describe('raceFirst — happy paths', () => {
     ];
 
     await raceFirst(candidates);
-    // Microtask flush for the loser's abort to propagate.
+    // let the loser's abort propagate
     await Promise.resolve();
     expect(aborts[0]!.aborted).toBe(true);
   });
@@ -91,7 +91,7 @@ describe('raceFirst — failure semantics', () => {
         endpoint: LAN,
         run: () => Promise.reject(Object.assign(new Error('lan'), { kind: 'needs-auth' })),
       },
-      { endpoint: WAN, run: () => new Promise<string>(() => {}) /* never */ },
+      { endpoint: WAN, run: () => new Promise<string>(() => {}) },
     ];
 
     const err = await raceFirst(candidates, {

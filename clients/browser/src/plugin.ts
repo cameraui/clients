@@ -83,12 +83,7 @@ function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
       rpc.value = next;
       isConnected.value = true;
       error.value = undefined;
-      // a blip shorter than the debounce with the SAME client keeps its plugin
-      // proxies (the nats lib re-issues its subscriptions itself) — a new
-      // client always needs the full refresh, its server-side state is
-      // connId-fresh. NATS core is at-most-once though: messages published
-      // during ANY gap are gone, so even the blip must emit 'reconnected' for
-      // data consumers to backfill.
+      // a same-client blip keeps its proxies, but nats core is at-most-once, so it still emits reconnected for backfill
       if (hasBeenConnected && (!wasConnected || clientChanged || sawDrop)) markLinkRestored(rpc);
       if (!wasConnected || clientChanged) {
         refreshClientSubscriptions();
@@ -106,10 +101,7 @@ function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
       downTimer = setTimeout(() => {
         downTimer = null;
         isConnected.value = false;
-        // No wipe — NATS drop is a transient transport event, the cached data
-        // (snapshots, events, etc.) is still valid for the next reconnect.
-        // resetClientState() is reserved for identity-level changes (instance
-        // switch, logout).
+        // no wipe: cached data outlives a drop, resetClientState is for instance switch and logout
         emit('disconnected');
       }, DOWN_DEBOUNCE_MS);
     }

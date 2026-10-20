@@ -103,11 +103,6 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
     }
     const lastTokens = options.lastTarget?.()?.tokens;
 
-    // Build candidates as a wrapper around `options.probe` that also fires
-    // per-attempt lifecycle callbacks (onProbeStart / onProbeSuccess /
-    // onProbeError). raceFirst handles the actual abort + timeout + short-
-    // circuit machinery; we only translate its outcome back into the kernel's
-    // PROBE_SUCCEEDED / PROBE_FAILED_ALL contract.
     const candidates: RaceCandidate<Tokens>[] = pool.map((endpoint) => ({
       endpoint,
       run: async (signal) => {
@@ -117,10 +112,7 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
           options.onProbeSuccess?.(endpoint, tokens);
           return tokens;
         } catch (err) {
-          // Translate per-candidate aborts (signal aborted, no typed kind)
-          // into typed `transient` failures. The signal reason separates the
-          // candidate's own timer from cleanup after the race settled — a
-          // candidate canceled at 80ms must not be logged as a 2s timeout.
+          // the reason tells the own timer from cleanup after the race settled, a cancel at 80ms is no 2s timeout
           let finalErr = err;
           if (signal.aborted && !ctrl.signal.aborted && !isProbeFailure(err)) {
             if ((signal as AbortSignal & { reason?: unknown }).reason === 'race-settled') {
@@ -142,19 +134,13 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
         parentSignal: ctrl.signal,
         prefer: options.prefer,
         preferGraceMs: options.preferGraceMs,
-        // needs-auth/fatal short-circuit because the same tokens (or lack
-        // thereof) reject every endpoint in this pool. `aborted` deliberately
-        // does NOT: Android's WebView rejects cert-blocked requests with
-        // cancellation-shaped errors, and one poisoned endpoint must not kill
-        // a healthy candidate mid-flight.
+        // not on aborted: Android WebViews reject cert-blocked requests as cancels, that must not kill a healthy candidate
         shortCircuit: (err) => isProbeFailure(err) && (err.kind === 'needs-auth' || err.kind === 'fatal'),
-        // canceled-request noise loses the representative-error pick, so the
-        // quick re-run below only triggers when ALL candidates were canceled
+        // canceled requests lose the error pick, so the quick re-run only triggers when all were canceled
         informative: (cause) => !(isProbeFailure(cause) && cause.kind === 'aborted'),
       });
       if (ctrl.signal.aborted) return;
-      // a probe that only confirmed the round's tokens must not undo a refresh that landed during the round,
-      // one carried over from offline may predate a login seeded since
+      // a confirming probe must not undo a refresh from this round, pending tokens from before it may predate a newer login
       const phase = options.kernel.phase;
       const refreshed = phase.kind === 'discovering' && phase.pendingTokens !== pendingAtStart ? phase.pendingTokens : undefined;
       const tokens = value === lastTokens && refreshed ? refreshed : value;
@@ -162,22 +148,14 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
     } catch (err) {
       if (ctrl.signal.aborted) return;
 
-      // Unwrap raceFirst's envelope: the `cause` carries the original probe
-      // error (timeout, needs-auth, etc.) — that's what downstream consumers
-      // (reducer, UI logger) reason about.
       const underlying = err instanceof RaceFirstError ? err.cause : err;
 
-      // External cancellation (browser navigation, service worker, page
-      // unload) is NOT a real connection failure — re-run the round shortly
-      // instead of flapping through `offline` and showing a disconnect banner
-      // for a non-issue.
+      // external cancellation (navigation, page unload) is no connection failure, re-run instead of going offline
       const allCanceled = isProbeFailure(underlying) && underlying.kind === 'aborted';
       if (allCanceled && ++canceledRounds < MAX_CANCELED_ROUNDS) {
         rerunTimer = setTimeout(() => {
           rerunTimer = undefined;
-          // Phase re-check: by the time this fires the kernel may have left
-          // discovering (RESET) or a NEW round may already be running —
-          // runRound() would cancel and restart that legitimate round.
+          // the kernel may have left discovering by now
           if (!detached && options.kernel.phase.kind === 'discovering') runRound();
         }, CANCELED_RERUN_MS);
         return;
@@ -204,7 +182,6 @@ export function attachProbeLoop(options: ProbeLoopOptions): Detach {
     }
   });
 
-  // Catch up if the kernel is already discovering when the effect is attached.
   if (options.kernel.phase.kind === 'discovering') {
     runRound();
   }

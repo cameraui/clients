@@ -101,11 +101,7 @@ export function setSnapshot(cameraId: string, data: ArrayBuffer, fetchedAt?: num
   if (stamp) stampCache.set(cameraId, stamp);
   else stampCache.delete(cameraId);
 
-  // Buffer is being replaced — schedule revocation of the old blob URL so the
-  // next read produces a fresh URL bound to the new bytes, but keep the old
-  // URL valid long enough for any pending img fetches to complete. The same
-  // buffer keeps its URL: cards that render it never see a new value, so a
-  // revoked URL would stay their src and break once the WebView re-reads it.
+  // only a new buffer gets a new URL: cards see no change for the same buffer, a revoked src would break on a WebView re-read
   if (snapshotCache.get(cameraId) !== data) {
     const oldUrl = urlCache.get(cameraId);
     if (oldUrl) {
@@ -114,8 +110,7 @@ export function setSnapshot(cameraId: string, data: ArrayBuffer, fetchedAt?: num
     }
     snapshotCache.set(cameraId, data);
   }
-  // Without a known fetch time (e.g. legacy servers serving their TTL cache)
-  // the previous stamp is left untouched — never guess Date.now().
+  // without a known fetch time the previous one stays, never guess Date.now()
   if (fetchedAt !== undefined) {
     timestampCache.set(cameraId, fetchedAt);
   }
@@ -177,8 +172,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
   hookReconnectRefresh(cameraUi, deviceManager);
 
   const snapshotSrc = computed(() => {
-    // Touch `snapshot.value` for reactivity, then resolve via the cameraId
-    // so consumers across the app share one blob URL per camera.
+    // resolved by cameraId, so the whole app shares one blob URL per camera
     if (!snapshot.value) return undefined;
     const idOrName = toValue(cameraIdOrName);
     const id = typeof idOrName === 'string' ? idOrName : idOrName._id;
@@ -217,13 +211,11 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     return typeof idOrName === 'string' ? idOrName : idOrName._id;
   }
 
-  // Hold the device for the composable's lifetime — closing it (refcount 0)
-  // kills its `snapshot:updated` subscription, so server auto-refresh pushes
-  // would never reach views that only render snapshots (e.g. the dashboard).
   async function holdDevice(id: string): Promise<void> {
     if (heldDeviceId === id || pendingHoldId === id) return;
     pendingHoldId = id;
     try {
+      // a closed device ends its snapshot:updated subscription, views that only render snapshots need those pushes
       const device = await acquireCameraDevice(deviceManager, id);
       if (!device) return;
 
@@ -285,17 +277,15 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
       // the cache keeps a newer push over a late reply
       if (result) snapshot.value = snapshotCache.get(id) ?? result;
     } catch {
-      // Camera may be offline / RPC timeout — silently ignore
+      // camera offline or rpc timeout
     } finally {
       _isLoading.value = false;
       initialLoadDone.value = true;
     }
   }
 
-  // Disabled cameras have no live stream — skip fetch entirely. Only works when
-  // the caller passes a full DBCamera object; a bare id can't expose disabled
-  // without a lookup, so it falls through to the normal fetch path.
   function isCameraDisabled(camOrId: string | DBCamera | undefined): boolean {
+    // a bare id can't expose disabled without a lookup, it takes the normal fetch path
     return typeof camOrId === 'object' && camOrId?.disabled === true;
   }
 
@@ -310,7 +300,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
       const result = await fetchSnapshotShared(deviceManager, id, true);
       if (result) snapshot.value = snapshotCache.get(id) ?? result;
     } catch {
-      // Camera may be offline / RPC timeout — silently ignore
+      // camera offline or rpc timeout
     } finally {
       _isLoading.value = false;
       initialLoadDone.value = true;
@@ -335,8 +325,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
         await holdDevice(id);
         await loadSnapshot(id);
       } else if (id) {
-        // Disconnected OR disabled — keep cached snapshot visible (if any) but
-        // don't trigger new fetches. The card's disabled overlay renders on top.
+        // disconnected or disabled: the cached snapshot stays, no new fetches
         releaseHeldDevice();
         snapshot.value = snapshotCache.get(id);
         initialLoadDone.value = true;

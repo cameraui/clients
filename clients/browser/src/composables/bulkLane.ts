@@ -35,9 +35,9 @@ export function markBulkDead(lane: BulkLane, client: RPCClient): void {
   deadMarks.set(lane, { client, since: performance.now(), stop });
 }
 
-// the caller already has its error, it never waits for the probe
 export function noticeBulkTimeout(lane: BulkLane, client: RPCClient): void {
   if (lane.value !== client || deadMarks.has(lane)) return;
+  // the caller already has its error, it never waits for the probe
   probeBulkClient(client).then((alive) => {
     if (!alive) markBulkDead(lane, client);
   });

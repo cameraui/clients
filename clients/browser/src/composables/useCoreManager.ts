@@ -16,5 +16,7 @@ export function useCoreManager(): ReactiveCoreManager {
     getServerAddresses: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getServerAddresses()),
     getPluginsByInterface: (interfaceName: PluginInterface) => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getPluginsByInterface(interfaceName)),
     getCloudServerId: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getCloudServerId()),
+    getRestoreGeneration: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getRestoreGeneration()),
+    getInstanceId: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getInstanceId()),
   };
 }

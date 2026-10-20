@@ -33,7 +33,6 @@ function openHandler(options: { mime?: string; tracks?: TrackSpec[]; init?: bool
   return { handler, video, onError, onReady, controller, mediaSource: video.mediaSource!, sourceBuffer: video.sourceBuffer! };
 }
 
-// a free box after the fragment brings it to `size` bytes without adding samples
 function paddedFrame(index: number, size: number): ArrayBuffer {
   const frame = videoFrame(index, 2);
   const padding = new Uint8Array(size - frame.byteLength);
