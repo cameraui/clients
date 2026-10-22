@@ -1,24 +1,20 @@
 import vue from '@vitejs/plugin-vue';
-import { dirname, resolve } from 'path';
+import { resolve } from 'path';
 import dts from 'unplugin-dts/vite';
-import { fileURLToPath } from 'url';
 import { defineConfig } from 'vite';
-
-const __filname = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filname);
 
 export default defineConfig({
   plugins: [
     vue(),
     dts({
-      entryRoot: resolve(__dirname, 'src'),
+      entryRoot: resolve(import.meta.dirname, 'src'),
       exclude: ['**/__tests__/**', '**/*.spec.ts'],
       bundleTypes: true,
     }),
   ],
   build: {
     lib: {
-      entry: resolve(__dirname, 'src/index.ts'),
+      entry: resolve(import.meta.dirname, 'src/index.ts'),
       name: 'CameraUiClient',
       formats: ['es'],
       fileName: 'index',
@@ -36,9 +32,12 @@ export default defineConfig({
   },
   resolve: {
     alias: [
-      { find: /^@nats-io\/transport-node$/, replacement: resolve(__dirname, '../../node_modules/@camera.ui/rpc/dist/browser.js') },
-      { find: /^@nats-io\/nats-core$/, replacement: resolve(__dirname, '../../node_modules/@camera.ui/rpc/externals/nats.js/core/src/mod.ts') },
-      { find: /^@nats-io\/nats-core\/internal$/, replacement: resolve(__dirname, '../../node_modules/@camera.ui/rpc/externals/nats.js/core/src/internal_mod.ts') },
+      { find: /^@nats-io\/transport-node$/, replacement: resolve(import.meta.dirname, '../../node_modules/@camera.ui/rpc/dist/browser.js') },
+      { find: /^@nats-io\/nats-core$/, replacement: resolve(import.meta.dirname, '../../node_modules/@camera.ui/rpc/externals/nats.js/core/src/mod.ts') },
+      {
+        find: /^@nats-io\/nats-core\/internal$/,
+        replacement: resolve(import.meta.dirname, '../../node_modules/@camera.ui/rpc/externals/nats.js/core/src/internal_mod.ts'),
+      },
     ],
   },
 });
