@@ -90,6 +90,26 @@ describe('createConnectionSignal', () => {
     }
   });
 
+  it('a channel that recovers without an up event inside the debounce never surfaces', async () => {
+    vi.useFakeTimers();
+    try {
+      const { socketio, nats, handle } = setup(onlinePhase());
+      await socketio.apply({ endpoint: LAN, tokens: TOKENS });
+      await nats.apply({ endpoint: LAN, tokens: TOKENS });
+      handle.recompute();
+
+      const stale = vi.spyOn(nats, 'health').mockReturnValue({ up: false, lastError: 'staleConnection' });
+      handle.recompute();
+      stale.mockRestore();
+      await vi.advanceTimersByTimeAsync(1_100);
+
+      expect(handle.current.kind).toBe('online');
+      handle.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('needs-auth applies instantly', () => {
     const { kernel, handle } = setup(onlinePhase());
     kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'rejected' });

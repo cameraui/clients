@@ -132,9 +132,9 @@ export function createConnectionSignal(options: ConnectionSignalOptions): Connec
     pendingSignal = raw;
     pendingTimer = setTimeout(() => {
       pendingTimer = null;
-      const held = pendingSignal;
       pendingSignal = null;
-      if (held) apply(compute().kind === held.kind ? compute() : held);
+      // health() recovers without an up event, so read it again
+      apply(compute());
     }, debounceMs);
   }
 
