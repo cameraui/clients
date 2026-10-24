@@ -5,7 +5,9 @@ import { createRetryTimer } from '../utils/createRetryTimer.js';
 import { acquireCameraDevice, releaseCameraDevice, rememberCameraName } from './useCameraById.js';
 import { useCameraUi } from './useCameraUi.js';
 import { useDeviceManager } from './useDeviceManager.js';
+import { useTabVisibility } from './useTabVisibility.js';
 
+import type { SnapshotSettings } from '@camera.ui/sdk';
 import type { ComputedRef, MaybeRefOrGetter, ShallowRef } from 'vue';
 import type { DBCamera } from '../server/index.js';
 import type { ReactiveCameraDevice } from '../types.js';
@@ -78,6 +80,14 @@ function hookReconnectRefresh(cameraUi: ReturnType<typeof useCameraUi>, deviceMa
       }
     }, 0);
   });
+}
+
+function isOutdated(settings: SnapshotSettings | undefined, fetchedAt: number | undefined): boolean {
+  if (!settings || settings.mode === 'onDemand') return false;
+  if (fetchedAt === undefined) return true;
+  // the timer keeps the server picture within one interval, a viewer gets a new one past maxAge
+  const keptMs = (settings.mode === 'interval' ? settings.interval : settings.maxAge) * 1000;
+  return Date.now() - fetchedAt > keptMs;
 }
 
 function deferRevoke(url: string): void {
@@ -164,6 +174,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
   const cameraUi = useCameraUi();
   const { isConnected } = cameraUi;
   const deviceManager = useDeviceManager();
+  const { onTabVisible } = useTabVisibility();
 
   const snapshot = shallowRef<ArrayBuffer | undefined>();
   const _isLoading = ref(false);
@@ -336,6 +347,14 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     },
     { immediate: true },
   );
+
+  onTabVisible(() => {
+    const id = currentId();
+    if (!isConnected.value || !heldDevice || heldDeviceId !== id) return;
+    if (!isOutdated(heldDevice.camera.value.snapshotSettings, timestampCache.get(id))) return;
+    // a backgrounded app misses pushes, the server has the newer picture cached
+    fetchSnapshotShared(deviceManager, id).catch(() => undefined);
+  });
 
   tryOnScopeDispose(() => {
     disposed = true;

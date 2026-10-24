@@ -13,6 +13,17 @@ import type { CameraUiContext } from '../../types.js';
 
 type Listener = (msg: unknown) => void;
 
+const { tabVisible } = vi.hoisted(() => ({ tabVisible: new Set<() => void>() }));
+
+vi.mock('../useTabVisibility.js', () => ({
+  useTabVisibility: () => ({
+    onTabVisible: (cb: () => void) => {
+      tabVisible.add(cb);
+      return () => tabVisible.delete(cb);
+    },
+  }),
+}));
+
 const CAMERA = { _id: 'cam-1', name: 'Front', sources: [{ _id: 'src-1', role: 'high-resolution' }] } as unknown as Camera;
 const CAMERA_SUBJECT = 'camera.cam-1.subscriber';
 
@@ -99,6 +110,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  tabVisible.clear();
   clearCameraCache();
   clearSnapshotCache();
   vi.useRealTimers();
@@ -1052,6 +1064,79 @@ describe('useSnapshot after a reconnect', () => {
 
     expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(3);
     expect(rpc.controller.snapshotWithMeta).toHaveBeenLastCalledWith('src-1', undefined);
+    stop();
+  });
+});
+
+describe('useSnapshot when the app comes back', () => {
+  function storedOnServer(rpc: ReturnType<typeof fakeClient>, snapshotSettings: Camera['snapshotSettings']) {
+    const camera = { ...CAMERA, snapshotSettings };
+    rpc.controller.getCamera.mockResolvedValue(camera);
+    rpc.controller.refreshStates.mockResolvedValue({ camera, cameraState: true, frameWorkerState: false, sensorStates: {} });
+    const stored = { data: jpeg(1), fetchedAt: Date.now() };
+    rpc.controller.snapshotWithMeta.mockImplementation(async (...args: unknown[]) => {
+      const ageMs = Date.now() - stored.fetchedAt;
+      if (args[2] === stored.fetchedAt) return { notModified: true, fetchedAt: stored.fetchedAt, ageMs };
+      return { data: stored.data, ageMs, fetchedAt: stored.fetchedAt };
+    });
+    return stored;
+  }
+
+  async function comeBackAfter(ms: number): Promise<void> {
+    await vi.advanceTimersByTimeAsync(ms);
+    for (const cb of [...tabVisible]) cb();
+    await vi.advanceTimersByTimeAsync(100);
+  }
+
+  it('shows the picture the server took while the app was in the background', async () => {
+    const rpc = fakeClient();
+    const stored = storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 });
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    const missed = jpeg(5);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    Object.assign(stored, { data: missed, fetchedAt: Date.now() - 20_000 });
+    await comeBackAfter(0);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenLastCalledWith('src-1', undefined, expect.any(Number));
+    expect(result.snapshot.value).toBe(missed);
+    stop();
+  });
+
+  it('waits for the next push while the picture is younger than one interval', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 });
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+
+    await comeBackAfter(55_000);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('asks past the max age when pictures are taken on view', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'onView', interval: 60, maxAge: 10 });
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+
+    await comeBackAfter(15_000);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('never asks for a camera that takes pictures only on request', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'onDemand', interval: 60, maxAge: 10 });
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+
+    await comeBackAfter(60 * 60_000);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
     stop();
   });
 });
