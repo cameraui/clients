@@ -65,7 +65,7 @@
     "vite": "^8.3.5",
     "vitest": "^5.0.5",
     "vue": "^3.5.44",
-    "vue-tsc": "3.3.11"
+    "vue-tsc": "3.3.13"
   },
   "overrides": {
     "@vue/language-core": "$@vue/language-core"
