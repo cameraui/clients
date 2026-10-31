@@ -16,7 +16,7 @@
     "lint": "npm run lint --workspaces --if-present",
     "release": "bash scripts/release.sh",
     "test": "npm run test --workspaces --if-present",
-    "update": "updates -M npm,pypi,go,cargo,docker,make --update ./ && npm run update --workspaces --if-present"
+    "update": "updates -M npm,pypi,go,cargo,docker --update ./ && npm run update --workspaces --if-present"
   },
   "homepage": "https://github.com/cameraui/clients#readme",
   "bugs": {

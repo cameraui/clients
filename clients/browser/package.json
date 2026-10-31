@@ -26,7 +26,7 @@
     "prepublishOnly": "npm i --package-lock-only && npm run lint && npm run format && npm run build",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "update": "updates -M npm,pypi,go,cargo,docker,make --update ./"
+    "update": "updates -M npm,pypi,go,cargo,docker --update ./"
   },
   "peerDependencies": {
     "@camera.ui/logger": ">=0.0.3",

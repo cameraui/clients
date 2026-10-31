@@ -52,7 +52,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "type-check": "tsc --noEmit",
-    "update": "updates -M npm,pypi,go,cargo,docker,make --update ./"
+    "update": "updates -M npm,pypi,go,cargo,docker --update ./"
   },
   "dependencies": {
     "@camera.ui/logger": ">=0.0.3",
