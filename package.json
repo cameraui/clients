@@ -29,11 +29,11 @@
   "license": "MIT",
   "author": "seydx",
   "devDependencies": {
-    "@types/node": "^26.6.5",
-    "@vue/language-core": "^3.3.13",
+    "@types/node": "^26.6.6",
+    "@vue/language-core": "^3.3.14",
     "tsx": "^4.23.15",
     "typescript": "5.9.3",
-    "updates": "^19.3.0"
+    "updates": "^20.0.0"
   },
   "overrides": {
     "@vue/language-core": "$@vue/language-core"
