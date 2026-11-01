@@ -975,6 +975,78 @@ describe('useSnapshot after a reconnect', () => {
     stop();
   });
 
+  it('asks again instead of joining a fetch whose reply went down with the link', async () => {
+    const rpc = fakeClient();
+    const { ctx, emit } = eventContext(rpc.client);
+    const { result, stop } = inContext(ctx, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    const fresh = jpeg(7);
+    const lost = deferred<unknown>();
+    rpc.controller.snapshotWithMeta.mockClear();
+    rpc.controller.snapshotWithMeta.mockReturnValueOnce(lost.promise).mockResolvedValueOnce({ data: fresh, ageMs: 0 });
+
+    emit('reconnected');
+    await vi.advanceTimersByTimeAsync(100);
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+
+    emit('reconnected');
+    await vi.advanceTimersByTimeAsync(100);
+
+    lost.resolve(undefined);
+    await flush();
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(2);
+    expect(result.snapshot.value).toBe(fresh);
+    stop();
+  });
+
+  it('keeps sharing the new fetch when the one from before the drop ends late', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 });
+    const { ctx, emit } = eventContext(rpc.client);
+    const { stop } = inContext(ctx, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    const lost = deferred<unknown>();
+    const running = deferred<unknown>();
+    rpc.controller.snapshotWithMeta.mockClear();
+    rpc.controller.snapshotWithMeta.mockReturnValueOnce(lost.promise).mockReturnValueOnce(running.promise);
+    emit('reconnected');
+    await vi.advanceTimersByTimeAsync(100);
+    emit('reconnected');
+    await vi.advanceTimersByTimeAsync(100);
+
+    lost.resolve(undefined);
+    await vi.advanceTimersByTimeAsync(100);
+    for (const cb of [...tabVisible]) cb();
+    await vi.advanceTimersByTimeAsync(100);
+
+    running.resolve(undefined);
+    await flush();
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('asks once when the connection watcher and the reconnect sweep both want a picture', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 });
+    const { ctx, emit } = eventContext(rpc.client);
+    const { stop } = inContext(ctx, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    ctx.isConnected.value = false;
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    const running = deferred<unknown>();
+    rpc.controller.snapshotWithMeta.mockClear();
+    rpc.controller.snapshotWithMeta.mockReturnValueOnce(running.promise);
+
+    ctx.isConnected.value = true;
+    emit('reconnected');
+    await vi.advanceTimersByTimeAsync(500);
+
+    running.resolve(undefined);
+    await flush();
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
   it('asks against the fetch time of the last push', async () => {
     const rpc = fakeClient();
     const stored = conditionalServer(rpc);
@@ -1317,6 +1389,47 @@ describe('useSnapshot age with another clock on the server', () => {
     stop();
   });
 
+  it('dates a reply that sat in a frozen app by its picture, not by the thaw', async () => {
+    const skew = -15 * 60_000;
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 }, skew);
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    const takenAt = Date.now();
+    const frozen = deferred<unknown>();
+    rpc.controller.snapshotWithMeta.mockReturnValueOnce(frozen.promise);
+
+    const refreshing = result.refresh();
+    await flush();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    frozen.resolve({ data: jpeg(2), ageMs: 1_000, fetchedAt: takenAt + skew });
+    await refreshing;
+
+    expect(getSnapshotTimestamp('cam-1')).toBe(takenAt);
+    stop();
+  });
+
+  it('keeps the learned clock when a reply sat in a frozen app', async () => {
+    const skew = -15 * 60_000;
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 }, skew);
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    const takenAt = Date.now();
+    const frozen = deferred<unknown>();
+    rpc.controller.snapshotWithMeta.mockReturnValueOnce(frozen.promise);
+
+    const refreshing = result.refresh();
+    await flush();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    frozen.resolve({ data: jpeg(2), ageMs: 1_000, fetchedAt: takenAt + skew });
+    await refreshing;
+
+    rpc.push(jpeg(3), Date.now() + skew);
+    expect(getSnapshotTimestamp('cam-1')).toBe(Date.now());
+    stop();
+  });
+
   it('keeps the server time of a push before any reply taught it the other clock', () => {
     expect(toBrowserTime(50_000)).toBe(50_000);
   });
@@ -1359,6 +1472,52 @@ describe('useSnapshot refresh activity', () => {
 
     await vi.advanceTimersByTimeAsync(1);
     expect(result.isRefreshing.value).toBe(false);
+    stop();
+  });
+
+  it('stays on through a push while a fetch asks the camera for a new picture', async () => {
+    const rpc = fakeClient();
+    const reply = deferred<unknown>();
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    rpc.controller.snapshotWithMeta.mockReturnValueOnce(reply.promise);
+
+    const refreshing = result.refresh();
+    await flush();
+    rpc.push(jpeg(2), Date.now());
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(result.isRefreshing.value).toBe(true);
+
+    reply.resolve({ data: jpeg(3), ageMs: 0 });
+    await refreshing;
+    await vi.advanceTimersByTimeAsync(499);
+    expect(result.isRefreshing.value).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result.isRefreshing.value).toBe(false);
+    stop();
+  });
+
+  it('ends with a pushed picture when the running fetch only wanted the current one', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 });
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    const obsolete = deferred<unknown>();
+    rpc.controller.snapshotWithMeta.mockReturnValueOnce(obsolete.promise);
+
+    for (const cb of [...tabVisible]) cb();
+    await flush();
+    expect(result.isRefreshing.value).toBe(true);
+
+    rpc.push(jpeg(2), Date.now());
+    await vi.advanceTimersByTimeAsync(499);
+    expect(result.isRefreshing.value).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result.isRefreshing.value).toBe(false);
+    obsolete.resolve(undefined);
+    await flush();
     stop();
   });
 

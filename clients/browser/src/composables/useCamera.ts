@@ -56,9 +56,18 @@ interface FetchedSnapshot {
 }
 
 const NOT_MODIFIED = 'not-modified';
+const CLOCK_SAMPLE_MAX_MS = 5_000;
 
 const snapshotWithMetaSupport = new WeakMap<RPCClient, boolean>();
 const sensorEventFanouts = new WeakMap<RPCClient, SensorEventFanout>();
+
+function replyTime(result: FetchedSnapshot, requestedAt: number): number | undefined {
+  if (result.stamp === undefined || result.fetchedAt === undefined) return result.fetchedAt;
+  // a reply that sat in a frozen app would date its picture to the thaw and every later push with it
+  if (Date.now() - requestedAt > CLOCK_SAMPLE_MAX_MS) return toBrowserTime(result.stamp);
+  rememberServerClock(result.fetchedAt, result.stamp);
+  return result.fetchedAt;
+}
 
 export async function createReactiveCameraDevice(rpcOrContext: RPCClient | ReactiveCameraDeviceContext, initialCamera: Camera): Promise<ReactiveCameraDevice> {
   const cameraNamespaces: CameraNamespaces = NamespaceManager.cameraNamespaces(initialCamera._id);
@@ -134,22 +143,22 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
 
   async function fetchSnapshot(sourceId: string, forceNew?: boolean): Promise<ArrayBuffer | undefined> {
     snapshotLoading.value = true;
-    startSnapshotRefresh(initialCamera._id);
+    startSnapshotRefresh(initialCamera._id, forceNew);
     const requestedAt = Date.now();
     try {
       const result = await requestSnapshot(sourceId, forceNew);
       if (result === NOT_MODIFIED) return getSnapshot(initialCamera._id);
       if (result && result.data.byteLength > 0) {
         const stamp = result.stamp === undefined ? undefined : { sourceId, fetchedAt: result.stamp };
-        if (stamp && result.fetchedAt !== undefined) rememberServerClock(result.fetchedAt, stamp.fetchedAt);
+        const fetchedAt = replyTime(result, requestedAt);
         // a reply of unknown age counts as taken when it was asked for
-        setSnapshot(initialCamera._id, result.data, result.fetchedAt, result.fetchedAt ?? requestedAt, stamp);
+        setSnapshot(initialCamera._id, result.data, fetchedAt, fetchedAt ?? requestedAt, stamp);
         return result.data;
       }
       return undefined;
     } finally {
       snapshotLoading.value = false;
-      endSnapshotRefresh(initialCamera._id);
+      endSnapshotRefresh(initialCamera._id, forceNew);
     }
   }
 

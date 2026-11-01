@@ -39,6 +39,7 @@ const subscribers = new Map<string, Set<() => void>>();
 const pendingLoads = new Map<string, Promise<ArrayBuffer | undefined>>();
 const refreshingCameras = reactive(new Set<string>());
 const refreshLingers = new Map<string, ReturnType<typeof setTimeout>>();
+const forcedRefreshes = new Map<string, number>();
 let serverClockOffset = 0;
 
 function notify(cameraId: string): void {
@@ -49,7 +50,7 @@ function fetchSnapshotShared(deviceManager: ReturnType<typeof useDeviceManager>,
   const pending = pendingLoads.get(id);
   if (pending) return pending;
 
-  const promise = (async (): Promise<ArrayBuffer | undefined> => {
+  const promise: Promise<ArrayBuffer | undefined> = (async () => {
     const device = await acquireCameraDevice(deviceManager, id);
     try {
       if (!device) return undefined;
@@ -59,7 +60,9 @@ function fetchSnapshotShared(deviceManager: ReturnType<typeof useDeviceManager>,
     } finally {
       if (device) releaseCameraDevice(device);
     }
-  })().finally(() => pendingLoads.delete(id));
+  })().finally(() => {
+    if (pendingLoads.get(id) === promise) pendingLoads.delete(id);
+  });
 
   pendingLoads.set(id, promise);
   return promise;
@@ -71,6 +74,8 @@ function hookReconnectRefresh(cameraUi: ReturnType<typeof useCameraUi>, deviceMa
   if (hookedContexts.has(cameraUi)) return;
   hookedContexts.add(cameraUi);
   cameraUi.on('reconnected', () => {
+    // a reply lost with the old link only ends in a timeout, nothing new may join that call
+    pendingLoads.clear();
     // the isConnected watchers re-subscribe in the next flush, a synchronous sweep finds every set empty
     setTimeout(() => {
       let delay = 0;
@@ -99,13 +104,21 @@ function deferRevoke(url: string): void {
   setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
 }
 
-export function startSnapshotRefresh(cameraId: string): void {
+export function startSnapshotRefresh(cameraId: string, forced = false): void {
   clearTimeout(refreshLingers.get(cameraId));
   refreshLingers.delete(cameraId);
+  if (forced) forcedRefreshes.set(cameraId, (forcedRefreshes.get(cameraId) ?? 0) + 1);
   refreshingCameras.add(cameraId);
 }
 
-export function endSnapshotRefresh(cameraId: string): void {
+export function endSnapshotRefresh(cameraId: string, forced = false): void {
+  const running = (forcedRefreshes.get(cameraId) ?? 0) - (forced ? 1 : 0);
+  // a new picture answers a fetch for the current one, not one that asked the camera for a new one
+  if (running > 0) {
+    forcedRefreshes.set(cameraId, running);
+    return;
+  }
+  forcedRefreshes.delete(cameraId);
   clearTimeout(refreshLingers.get(cameraId));
   // a reply from the server's store takes milliseconds and a push none, nobody would see that
   const linger = setTimeout(() => {
@@ -201,6 +214,7 @@ export function clearSnapshotCache(): void {
   takenAtCache.clear();
   stampCache.clear();
   refreshLingers.clear();
+  forcedRefreshes.clear();
   refreshingCameras.clear();
   serverClockOffset = 0;
 }
