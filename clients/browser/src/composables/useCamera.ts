@@ -5,7 +5,16 @@ import { NamespaceManager } from '../server/index.js';
 import { createRetryTimer } from '../utils/createRetryTimer.js';
 import { liveBulkClient, markBulkDead, probeBulkClient } from './bulkLane.js';
 import { isLinkSettling, isLocalNoResponders, rpcCall } from './useRpc.js';
-import { getSnapshot, getSnapshotStamp, setSnapshot, subscribeSnapshot } from './useSnapshot.js';
+import {
+  endSnapshotRefresh,
+  getSnapshot,
+  getSnapshotStamp,
+  rememberServerClock,
+  setSnapshot,
+  startSnapshotRefresh,
+  subscribeSnapshot,
+  toBrowserTime,
+} from './useSnapshot.js';
 
 import type { RPCClient } from '@camera.ui/rpc';
 import type { Camera, CameraInput, CameraSource, ProbeConfig, ProbeStream } from '@camera.ui/sdk';
@@ -125,12 +134,14 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
 
   async function fetchSnapshot(sourceId: string, forceNew?: boolean): Promise<ArrayBuffer | undefined> {
     snapshotLoading.value = true;
+    startSnapshotRefresh(initialCamera._id);
     const requestedAt = Date.now();
     try {
       const result = await requestSnapshot(sourceId, forceNew);
       if (result === NOT_MODIFIED) return getSnapshot(initialCamera._id);
       if (result && result.data.byteLength > 0) {
         const stamp = result.stamp === undefined ? undefined : { sourceId, fetchedAt: result.stamp };
+        if (stamp && result.fetchedAt !== undefined) rememberServerClock(result.fetchedAt, stamp.fetchedAt);
         // a reply of unknown age counts as taken when it was asked for
         setSnapshot(initialCamera._id, result.data, result.fetchedAt, result.fetchedAt ?? requestedAt, stamp);
         return result.data;
@@ -138,6 +149,7 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
       return undefined;
     } finally {
       snapshotLoading.value = false;
+      endSnapshotRefresh(initialCamera._id);
     }
   }
 
@@ -286,7 +298,7 @@ export async function createReactiveCameraDevice(rpcOrContext: RPCClient | React
         break;
       case 'snapshot:updated': {
         const { sourceId, snapshot: data, fetchedAt } = event.data;
-        setSnapshot(initialCamera._id, data, fetchedAt, undefined, sourceId && fetchedAt !== undefined ? { sourceId, fetchedAt } : undefined);
+        setSnapshot(initialCamera._id, data, toBrowserTime(fetchedAt), undefined, sourceId && fetchedAt !== undefined ? { sourceId, fetchedAt } : undefined);
         break;
       }
     }

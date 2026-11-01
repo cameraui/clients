@@ -4,7 +4,7 @@ import { createApp, effectScope, ref, shallowRef } from 'vue';
 import { CAMERA_UI_INJECTION_KEY } from '../../plugin.js';
 import { createReactiveCameraDevice } from '../useCamera.js';
 import { clearCameraCache } from '../useCameraById.js';
-import { clearSnapshotCache, getSnapshot, getSnapshotStamp, getSnapshotTimestamp, setSnapshot, subscribeSnapshot, useSnapshot } from '../useSnapshot.js';
+import { clearSnapshotCache, getSnapshot, getSnapshotStamp, getSnapshotTimestamp, setSnapshot, subscribeSnapshot, toBrowserTime, useSnapshot } from '../useSnapshot.js';
 
 import type { RPCClient } from '@camera.ui/rpc';
 import type { Camera } from '@camera.ui/sdk';
@@ -13,10 +13,11 @@ import type { CameraUiContext } from '../../types.js';
 
 type Listener = (msg: unknown) => void;
 
-const { tabVisible } = vi.hoisted(() => ({ tabVisible: new Set<() => void>() }));
+const { tabVisible, tabShown } = vi.hoisted(() => ({ tabVisible: new Set<() => void>(), tabShown: { value: true } }));
 
 vi.mock('../useTabVisibility.js', () => ({
   useTabVisibility: () => ({
+    isVisible: tabShown,
     onTabVisible: (cb: () => void) => {
       tabVisible.add(cb);
       return () => tabVisible.delete(cb);
@@ -111,6 +112,7 @@ beforeEach(() => {
 
 afterEach(() => {
   tabVisible.clear();
+  tabShown.value = true;
   clearCameraCache();
   clearSnapshotCache();
   vi.useRealTimers();
@@ -1068,22 +1070,24 @@ describe('useSnapshot after a reconnect', () => {
   });
 });
 
-describe('useSnapshot when the app comes back', () => {
-  function storedOnServer(rpc: ReturnType<typeof fakeClient>, snapshotSettings: Camera['snapshotSettings']) {
-    const camera = { ...CAMERA, snapshotSettings };
-    rpc.controller.getCamera.mockResolvedValue(camera);
-    rpc.controller.refreshStates.mockResolvedValue({ camera, cameraState: true, frameWorkerState: false, sensorStates: {} });
-    const stored = { data: jpeg(1), fetchedAt: Date.now() };
-    rpc.controller.snapshotWithMeta.mockImplementation(async (...args: unknown[]) => {
-      const ageMs = Date.now() - stored.fetchedAt;
-      if (args[2] === stored.fetchedAt) return { notModified: true, fetchedAt: stored.fetchedAt, ageMs };
-      return { data: stored.data, ageMs, fetchedAt: stored.fetchedAt };
-    });
-    return stored;
-  }
+function storedOnServer(rpc: ReturnType<typeof fakeClient>, snapshotSettings: Camera['snapshotSettings'], serverClockMs = 0) {
+  const camera = { ...CAMERA, snapshotSettings };
+  rpc.controller.getCamera.mockResolvedValue(camera);
+  rpc.controller.refreshStates.mockResolvedValue({ camera, cameraState: true, frameWorkerState: false, sensorStates: {} });
+  const stored = { data: jpeg(1), fetchedAt: Date.now() + serverClockMs };
+  rpc.controller.snapshotWithMeta.mockImplementation(async (...args: unknown[]) => {
+    const ageMs = Date.now() + serverClockMs - stored.fetchedAt;
+    if (args[2] === stored.fetchedAt) return { notModified: true, fetchedAt: stored.fetchedAt, ageMs };
+    return { data: stored.data, ageMs, fetchedAt: stored.fetchedAt };
+  });
+  return stored;
+}
 
+describe('useSnapshot when the app comes back', () => {
   async function comeBackAfter(ms: number): Promise<void> {
+    tabShown.value = false;
     await vi.advanceTimersByTimeAsync(ms);
+    tabShown.value = true;
     for (const cb of [...tabVisible]) cb();
     await vi.advanceTimersByTimeAsync(100);
   }
@@ -1137,6 +1141,248 @@ describe('useSnapshot when the app comes back', () => {
     await comeBackAfter(60 * 60_000);
 
     expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+    stop();
+  });
+});
+
+describe('useSnapshot when a card mounts again', () => {
+  async function remountAfter(ms: number, rpc: ReturnType<typeof fakeClient>) {
+    const first = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    first.stop();
+    await vi.advanceTimersByTimeAsync(ms);
+    return () => inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+  }
+
+  it('shows the picture the server took while no card was open', async () => {
+    const rpc = fakeClient();
+    const stored = storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 });
+    const remount = await remountAfter(5 * 60_000, rpc);
+    const missed = jpeg(5);
+    Object.assign(stored, { data: missed, fetchedAt: Date.now() - 20_000 });
+
+    const { result, stop } = remount();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(result.snapshot.value).toBe(missed);
+    stop();
+  });
+
+  it('keeps the cached picture without asking while it is younger than one interval', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 });
+    const remount = await remountAfter(30_000, rpc);
+
+    const { stop } = remount();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('asks past the max age when pictures are taken on view', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'onView', interval: 60, maxAge: 10 });
+    const remount = await remountAfter(15_000, rpc);
+
+    const { stop } = remount();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('never asks for a camera that takes pictures only on request', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'onDemand', interval: 60, maxAge: 10 });
+    const remount = await remountAfter(60 * 60_000, rpc);
+
+    const { stop } = remount();
+    await vi.advanceTimersByTimeAsync(100);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+    stop();
+  });
+});
+
+describe('useSnapshot while a card stays open', () => {
+  function newPictureOnEveryAsk(stored: ReturnType<typeof storedOnServer>, rpc: ReturnType<typeof fakeClient>): void {
+    let tag = 10;
+    rpc.controller.snapshotWithMeta.mockImplementation(async () => {
+      Object.assign(stored, { data: jpeg(tag++), fetchedAt: Date.now() });
+      return { data: stored.data, ageMs: 0, fetchedAt: stored.fetchedAt };
+    });
+  }
+
+  it('asks once the picture passes the max age when pictures are taken on view', async () => {
+    const rpc = fakeClient();
+    const stored = storedOnServer(rpc, { mode: 'onView', interval: 60, maxAge: 10 });
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    newPictureOnEveryAsk(stored, rpc);
+    const shown = result.snapshot.value;
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(2);
+    expect(result.snapshot.value).not.toBe(shown);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(3);
+    stop();
+  });
+
+  it('counts the max age from a picture another viewer got', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'onView', interval: 60, maxAge: 10 });
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(5_000);
+    rpc.push(jpeg(2), Date.now());
+
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('does not ask while the tab is hidden', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'onView', interval: 60, maxAge: 10 });
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    tabShown.value = false;
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('waits a full round after a try that brought nothing newer', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'onView', interval: 60, maxAge: 10 });
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(9_000);
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(1_100);
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(3);
+    stop();
+  });
+
+  it('leaves it to the server timer on a regular camera', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 });
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+    stop();
+  });
+
+  it('stops asking once the card is gone', async () => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'onView', interval: 60, maxAge: 10 });
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+    stop();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(rpc.controller.snapshotWithMeta).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('useSnapshot age with another clock on the server', () => {
+  it.each([
+    ['behind', -15 * 60_000],
+    ['ahead', 15 * 60_000],
+  ])('counts a pushed picture from now with a server clock %s of this one', async (_name, skew) => {
+    const rpc = fakeClient();
+    storedOnServer(rpc, { mode: 'interval', interval: 60, maxAge: 10 }, skew);
+    const { stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(100);
+
+    const serverTime = Date.now() + skew;
+    rpc.push(jpeg(2), serverTime);
+
+    expect(getSnapshotTimestamp('cam-1')).toBe(Date.now());
+    expect(getSnapshotStamp('cam-1', 'src-1')).toBe(serverTime);
+    stop();
+  });
+
+  it('keeps the server time of a push before any reply taught it the other clock', () => {
+    expect(toBrowserTime(50_000)).toBe(50_000);
+  });
+});
+
+describe('useSnapshot refresh activity', () => {
+  it('stays on while a fetch runs and a moment after, so a quick one can be seen', async () => {
+    const rpc = fakeClient();
+    const reply = deferred<unknown>();
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(result.isRefreshing.value).toBe(false);
+    rpc.controller.snapshotWithMeta.mockReturnValueOnce(reply.promise);
+
+    const refreshing = result.refresh();
+    await flush();
+    expect(result.isRefreshing.value).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(result.isRefreshing.value).toBe(true);
+
+    reply.resolve({ data: jpeg(2), ageMs: 0 });
+    await refreshing;
+    await vi.advanceTimersByTimeAsync(499);
+    expect(result.isRefreshing.value).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result.isRefreshing.value).toBe(false);
+    stop();
+  });
+
+  it('shows briefly for a pushed picture', async () => {
+    const rpc = fakeClient();
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    rpc.push(jpeg(2), Date.now());
+    await vi.advanceTimersByTimeAsync(499);
+    expect(result.isRefreshing.value).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1);
+    expect(result.isRefreshing.value).toBe(false);
+    stop();
+  });
+
+  it('ends after a failed fetch', async () => {
+    const rpc = fakeClient();
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(1_000);
+    rpc.controller.snapshotWithMeta.mockRejectedValueOnce(Object.assign(new Error('Source not found'), { code: 'INTERNAL_ERROR' }));
+
+    await result.refresh();
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(result.isRefreshing.value).toBe(false);
+    stop();
+  });
+
+  it('stays off for a picture another camera got', async () => {
+    const rpc = fakeClient();
+    const { result, stop } = inContext({ rpc: shallowRef(rpc.client) }, () => useSnapshot('cam-1'));
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    setSnapshot('cam-2', jpeg(2), Date.now());
+
+    expect(result.isRefreshing.value).toBe(false);
     stop();
   });
 });

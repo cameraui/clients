@@ -1,5 +1,5 @@
 import { tryOnScopeDispose } from '@vueuse/core';
-import { computed, ref, shallowRef, toValue, watch } from 'vue';
+import { computed, reactive, ref, shallowRef, toValue, watch } from 'vue';
 
 import { createRetryTimer } from '../utils/createRetryTimer.js';
 import { acquireCameraDevice, releaseCameraDevice, rememberCameraName } from './useCameraById.js';
@@ -22,11 +22,13 @@ export interface UseSnapshotReturn {
   snapshotSrc: ComputedRef<string | undefined>;
   snapshotTimestamp: ComputedRef<number | undefined>;
   isLoading: ComputedRef<boolean>;
+  isRefreshing: ComputedRef<boolean>;
   refresh: () => Promise<void>;
 }
 
 const REVOKE_DELAY_MS = 5000;
 const SERVER_CLOCK_STEP_MS = 60_000;
+const REFRESH_LINGER_MS = 500;
 
 const snapshotCache = new Map<string, ArrayBuffer>();
 const timestampCache = new Map<string, number>();
@@ -35,6 +37,9 @@ const stampCache = new Map<string, SnapshotStamp>();
 const urlCache = new Map<string, string>();
 const subscribers = new Map<string, Set<() => void>>();
 const pendingLoads = new Map<string, Promise<ArrayBuffer | undefined>>();
+const refreshingCameras = reactive(new Set<string>());
+const refreshLingers = new Map<string, ReturnType<typeof setTimeout>>();
+let serverClockOffset = 0;
 
 function notify(cameraId: string): void {
   subscribers.get(cameraId)?.forEach((cb) => cb());
@@ -94,6 +99,30 @@ function deferRevoke(url: string): void {
   setTimeout(() => URL.revokeObjectURL(url), REVOKE_DELAY_MS);
 }
 
+export function startSnapshotRefresh(cameraId: string): void {
+  clearTimeout(refreshLingers.get(cameraId));
+  refreshLingers.delete(cameraId);
+  refreshingCameras.add(cameraId);
+}
+
+export function endSnapshotRefresh(cameraId: string): void {
+  clearTimeout(refreshLingers.get(cameraId));
+  // a reply from the server's store takes milliseconds and a push none, nobody would see that
+  const linger = setTimeout(() => {
+    refreshLingers.delete(cameraId);
+    refreshingCameras.delete(cameraId);
+  }, REFRESH_LINGER_MS);
+  refreshLingers.set(cameraId, linger);
+}
+
+export function rememberServerClock(browserTime: number, serverTime: number): void {
+  serverClockOffset = browserTime - serverTime;
+}
+
+export function toBrowserTime(serverTime: number | undefined): number | undefined {
+  return serverTime === undefined ? undefined : serverTime + serverClockOffset;
+}
+
 function isOlderThanHeld(cameraId: string, takenAt: number | undefined, stamp: SnapshotStamp | undefined): boolean {
   const held = stampCache.get(cameraId);
   if (stamp && held) {
@@ -119,6 +148,8 @@ export function setSnapshot(cameraId: string, data: ArrayBuffer, fetchedAt?: num
       urlCache.delete(cameraId);
     }
     snapshotCache.set(cameraId, data);
+    startSnapshotRefresh(cameraId);
+    endSnapshotRefresh(cameraId);
   }
   // without a known fetch time the previous one stays, never guess Date.now()
   if (fetchedAt !== undefined) {
@@ -163,18 +194,22 @@ export function getSnapshotUrl(cameraId: string): string | undefined {
 
 export function clearSnapshotCache(): void {
   for (const url of urlCache.values()) URL.revokeObjectURL(url);
+  for (const linger of refreshLingers.values()) clearTimeout(linger);
   urlCache.clear();
   snapshotCache.clear();
   timestampCache.clear();
   takenAtCache.clear();
   stampCache.clear();
+  refreshLingers.clear();
+  refreshingCameras.clear();
+  serverClockOffset = 0;
 }
 
 export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>): UseSnapshotReturn {
   const cameraUi = useCameraUi();
   const { isConnected } = cameraUi;
   const deviceManager = useDeviceManager();
-  const { onTabVisible } = useTabVisibility();
+  const { isVisible, onTabVisible } = useTabVisibility();
 
   const snapshot = shallowRef<ArrayBuffer | undefined>();
   const _isLoading = ref(false);
@@ -203,6 +238,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     }
     const updateFn = (): void => {
       snapshot.value = snapshotCache.get(cameraId);
+      armViewRefresh(cameraId);
     };
     subscribers.get(cameraId)!.add(updateFn);
     return () => {
@@ -214,6 +250,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
   let heldDeviceId: string | undefined;
   let heldDevice: ReactiveCameraDevice | undefined;
   let pendingHoldId: string | undefined;
+  let viewRefreshTimer: ReturnType<typeof setTimeout> | undefined;
   const holdRetry = createRetryTimer();
   let disposed = false;
 
@@ -239,6 +276,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
       heldDeviceId = id;
       heldDevice = device;
       cancelHoldRetry();
+      armViewRefresh(id);
     } catch {
       if (currentId() === id) scheduleHoldRetry(id);
     } finally {
@@ -263,11 +301,39 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
   }
 
   function releaseHeldDevice(): void {
+    clearTimeout(viewRefreshTimer);
     if (heldDeviceId) {
       if (heldDevice) releaseCameraDevice(heldDevice);
       heldDeviceId = undefined;
       heldDevice = undefined;
     }
+  }
+
+  function refreshIfOutdated(id: string): void {
+    if (!isConnected.value || !heldDevice || heldDeviceId !== id) return;
+    if (!isOutdated(heldDevice.camera.value.snapshotSettings, timestampCache.get(id))) return;
+    // a backgrounded app and a closed device miss pushes, the server has the newer picture cached
+    fetchSnapshotShared(deviceManager, id).catch(() => undefined);
+  }
+
+  function armViewRefresh(id: string): void {
+    clearTimeout(viewRefreshTimer);
+    const settings = heldDevice?.camera.value.snapshotSettings;
+    if (heldDeviceId !== id || settings?.mode !== 'onView') return;
+    const maxAgeMs = settings.maxAge * 1000;
+    const leftMs = (timestampCache.get(id) ?? 0) + maxAgeMs - Date.now();
+    // already past the age means the last try got nothing newer
+    viewRefreshTimer = setTimeout(
+      () => {
+        refreshOnView(id);
+      },
+      leftMs > 0 ? leftMs : maxAgeMs,
+    );
+  }
+
+  async function refreshOnView(id: string): Promise<void> {
+    if (isVisible.value && isConnected.value) await fetchSnapshotShared(deviceManager, id).catch(() => undefined);
+    armViewRefresh(id);
   }
 
   function showCached(id: string): boolean {
@@ -280,7 +346,10 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
 
   async function loadSnapshot(id: string, skipCache = false): Promise<void> {
     if (!isConnected.value || !id) return;
-    if (!skipCache && showCached(id)) return;
+    if (!skipCache && showCached(id)) {
+      refreshIfOutdated(id);
+      return;
+    }
 
     _isLoading.value = true;
     try {
@@ -348,13 +417,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     { immediate: true },
   );
 
-  onTabVisible(() => {
-    const id = currentId();
-    if (!isConnected.value || !heldDevice || heldDeviceId !== id) return;
-    if (!isOutdated(heldDevice.camera.value.snapshotSettings, timestampCache.get(id))) return;
-    // a backgrounded app misses pushes, the server has the newer picture cached
-    fetchSnapshotShared(deviceManager, id).catch(() => undefined);
-  });
+  onTabVisible(() => refreshIfOutdated(currentId()));
 
   tryOnScopeDispose(() => {
     disposed = true;
@@ -368,6 +431,7 @@ export function useSnapshot(cameraIdOrName: MaybeRefOrGetter<string | DBCamera>)
     snapshotSrc,
     snapshotTimestamp,
     isLoading: computed(() => _isLoading.value || !initialLoadDone.value),
+    isRefreshing: computed(() => refreshingCameras.has(currentId())),
     refresh,
   };
 }
