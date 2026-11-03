@@ -38,7 +38,7 @@
   },
   "devDependencies": {
     "@camera.ui/logger": "file:../../packages/logger",
-    "@camera.ui/rpc": "^1.1.1",
+    "@camera.ui/rpc": "^1.1.2",
     "@camera.ui/sdk": "~1.4.5",
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.4.0",
@@ -63,7 +63,7 @@
     "unplugin-dts": "^1.1.2",
     "updates": "^20.0.0",
     "vite": "^8.3.5",
-    "vitest": "^5.0.5",
+    "vitest": "^5.1.0",
     "vue": "^3.5.44",
     "vue-tsc": "3.3.11"
   },
