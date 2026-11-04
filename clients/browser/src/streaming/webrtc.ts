@@ -8,11 +8,21 @@ interface BasePeerConnectionState {
   isConnected: boolean;
 }
 
-function createBasePeerConnection(signal: AbortSignal, onCandidate: (candidate: string) => void, filterUdp: boolean): RTCPeerConnection {
-  const peerConnection = new RTCPeerConnection({
-    bundlePolicy: 'max-bundle',
-    iceServers: [...STREAM_CONFIG.WEBRTC.ICE_SERVERS],
-  });
+function newPeerConnection(iceServers: RTCIceServer[] = [...STREAM_CONFIG.WEBRTC.ICE_SERVERS]): RTCPeerConnection {
+  try {
+    return new RTCPeerConnection({ bundlePolicy: 'max-bundle', iceServers });
+  } catch {
+    return new RTCPeerConnection({ bundlePolicy: 'max-bundle', iceServers: [...STREAM_CONFIG.WEBRTC.ICE_SERVERS] });
+  }
+}
+
+function createBasePeerConnection(
+  signal: AbortSignal,
+  onCandidate: (candidate: string) => void,
+  filterUdp: boolean,
+  iceServers: RTCIceServer[] | undefined,
+): RTCPeerConnection {
+  const peerConnection = newPeerConnection(iceServers);
 
   peerConnection.onicecandidate = (ev) => {
     if (signal.aborted) return;
@@ -72,6 +82,7 @@ function closePeerConnection(state: BasePeerConnectionState): void {
 
 export interface WebRTCHandlerOptions {
   mode: 'webrtc' | 'webrtc/tcp';
+  iceServers?: RTCIceServer[];
   onConnected: (stream: MediaStream) => void;
   onDisconnected: () => void;
   onFailed: () => void;
@@ -90,6 +101,7 @@ export interface WebRTCHandler {
 
 export interface BackchannelHandlerOptions {
   filterUdp: boolean;
+  iceServers?: RTCIceServer[];
   onConnected: () => void;
   onFailed: () => void;
   onCandidate: (candidate: string) => void;
@@ -106,7 +118,7 @@ export interface BackchannelHandler {
 }
 
 export function createWebRTCHandler(options: WebRTCHandlerOptions): WebRTCHandler {
-  const { mode, onConnected, onDisconnected, onFailed, onCandidate, signal } = options;
+  const { mode, iceServers, onConnected, onDisconnected, onFailed, onCandidate, signal } = options;
 
   const state: BasePeerConnectionState = {
     pc: null,
@@ -117,7 +129,7 @@ export function createWebRTCHandler(options: WebRTCHandlerOptions): WebRTCHandle
   const filterUdp = mode === 'webrtc/tcp';
 
   function createPeerConnection(): RTCPeerConnection {
-    const peerConnection = createBasePeerConnection(signal, onCandidate, filterUdp);
+    const peerConnection = createBasePeerConnection(signal, onCandidate, filterUdp, iceServers);
 
     peerConnection.onconnectionstatechange = () => {
       if (signal.aborted) return;
@@ -182,7 +194,7 @@ export function createWebRTCHandler(options: WebRTCHandlerOptions): WebRTCHandle
 }
 
 export function createBackchannelHandler(options: BackchannelHandlerOptions): BackchannelHandler {
-  const { filterUdp, onConnected, onFailed, onCandidate, signal } = options;
+  const { filterUdp, iceServers, onConnected, onFailed, onCandidate, signal } = options;
 
   const state: BasePeerConnectionState = {
     pc: null,
@@ -207,7 +219,7 @@ export function createBackchannelHandler(options: BackchannelHandlerOptions): Ba
   }
 
   function createPeerConnection(): RTCPeerConnection {
-    const peerConnection = createBasePeerConnection(signal, sendCandidate, filterUdp);
+    const peerConnection = createBasePeerConnection(signal, sendCandidate, filterUdp, iceServers);
 
     peerConnection.onconnectionstatechange = () => {
       if (signal.aborted) return;

@@ -28,7 +28,7 @@ import type { ReactiveCameraDevice } from '../../types.js';
 import type { VideoStreamingMode } from '../types.js';
 import type { FakeWsHandle } from './fakes.js';
 
-const ctx = vi.hoisted(() => ({ target: undefined as unknown, wsTransport: undefined as unknown }));
+const ctx = vi.hoisted(() => ({ target: undefined as unknown, wsTransport: undefined as unknown, iceServers: undefined as unknown }));
 const tab = vi.hoisted(() => ({
   paused: [] as { cb: () => void; delayMs?: number }[],
   visible: [] as ((info: { hiddenMs: number }) => void)[],
@@ -64,11 +64,12 @@ const PROBE_WITH_TALK: ProbeStream = {
   ],
 } as ProbeStream;
 
-function setup(options: { mode?: VideoStreamingMode; sources?: CameraSource[]; probe?: ProbeStream } = {}) {
+function setup(options: { mode?: VideoStreamingMode; sources?: CameraSource[]; probe?: ProbeStream; iceServers?: RTCIceServer[] } = {}) {
   const ws = new FakeWsTransport();
   const target = ref({ endpoint: { url: 'http://nvr.local' }, tokens: { access: 'token' } });
   ctx.target = target;
   ctx.wsTransport = ws;
+  ctx.iceServers = options.iceServers ? ref(options.iceServers) : undefined;
   const camera = {
     name: ref('Garage'),
     sources: ref(options.sources ?? [H264_SOURCE]),
@@ -1193,6 +1194,38 @@ describe('StreamConnection talkback', () => {
     const nextTalk = FakePeerConnection.instances.at(-1)!;
     expect(nextTalk.closed).toBe(false);
     expect(offers(handle)).toBe(2);
+    scope.stop();
+  });
+
+  it('gives the picture and the talk peer the ICE servers of the server', async () => {
+    const iceServers = [{ urls: ['stun:stun.example.com:3478'] }, { urls: ['turn:turn.example.com:3478'], username: 'user', credential: 'secret' }];
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK, iceServers });
+    await conn.start();
+    await playWebRTC(ws.handles[0], video);
+
+    await conn.setMicrophone(MIC);
+    await settle();
+
+    expect(FakePeerConnection.instances.map((pc) => pc.config?.iceServers)).toEqual([iceServers, iceServers]);
+    scope.stop();
+  });
+
+  it('falls back to the default ICE servers when the browser rejects the list', async () => {
+    vi.stubGlobal(
+      'RTCPeerConnection',
+      class extends FakePeerConnection {
+        constructor(config?: RTCConfiguration) {
+          if (config?.iceServers?.some((server) => server.urls === 'stun:bad host')) throw new DOMException('bad url', 'SyntaxError');
+          super(config);
+        }
+      },
+    );
+    const { conn, ws, scope } = setup({ mode: 'webrtc', iceServers: [{ urls: 'stun:bad host' }] });
+    await conn.start();
+    ws.handles[0].serverOpen();
+    await settle();
+
+    expect(FakePeerConnection.instances[0].config?.iceServers).toEqual(STREAM_CONFIG.WEBRTC.ICE_SERVERS);
     scope.stop();
   });
 });

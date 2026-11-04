@@ -31,6 +31,7 @@ export interface CameraUiContext {
   extraProxyQuery: Readonly<Ref<Record<string, string> | undefined>>;
   error: Readonly<Ref<Error | undefined>>;
   wsTransport?: WsTransport;
+  iceServers?: Readonly<Ref<RTCIceServer[] | undefined>>;
   on: (event: CameraUiEventType, cb: CameraUiEventCallback) => void;
   off: (event: CameraUiEventType, cb: CameraUiEventCallback) => void;
 }

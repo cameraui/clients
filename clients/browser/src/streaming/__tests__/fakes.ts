@@ -670,7 +670,7 @@ export class FakePeerConnection {
 
   private received: FakeTrack['kind'][] = [];
 
-  constructor() {
+  constructor(public config?: RTCConfiguration) {
     FakePeerConnection.instances.push(this);
   }
 

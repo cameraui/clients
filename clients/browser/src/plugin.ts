@@ -20,6 +20,7 @@ export interface CameraUiPluginInput {
   bulkTransport?: NatsTransport;
   target: Ref<ConnectionTarget | null>;
   wsTransport?: WsTransport;
+  iceServers?: Readonly<Ref<RTCIceServer[] | undefined>>;
 }
 
 function isContext(input: CameraUiContext | CameraUiPluginInput): input is CameraUiContext {
@@ -29,7 +30,7 @@ function isContext(input: CameraUiContext | CameraUiPluginInput): input is Camer
 const DOWN_DEBOUNCE_MS = 4_000;
 
 function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
-  const { natsTransport, bulkTransport, target, wsTransport } = input;
+  const { natsTransport, bulkTransport, target, wsTransport, iceServers } = input;
 
   let hasBeenConnected = natsTransport.getClient() !== null;
   let lastClient: RPCClient | null = natsTransport.getClient();
@@ -140,6 +141,7 @@ function makeContextFromTransport(input: CameraUiPluginInput): CameraUiContext {
     extraProxyQuery,
     error: readonly(error),
     wsTransport,
+    iceServers,
     on,
     off,
   });

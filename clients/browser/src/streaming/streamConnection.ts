@@ -93,6 +93,7 @@ export class StreamConnection implements ReactiveStream {
   private readonly triedSourceIds = new Set<string>();
   private readonly options: StreamConnectionOptions;
   private readonly wsTransport: WsTransport;
+  private readonly iceServers: Readonly<Ref<RTCIceServer[] | undefined>> | undefined;
   private readonly scope = effectScope(true);
   private readonly stopsWhenHidden = suspendsWhenHidden();
 
@@ -154,6 +155,7 @@ export class StreamConnection implements ReactiveStream {
     }
     this.target = ctx.target;
     this.wsTransport = ctx.wsTransport;
+    this.iceServers = ctx.iceServers;
 
     const { autoStart = true } = options;
 
@@ -1211,6 +1213,7 @@ export class StreamConnection implements ReactiveStream {
 
     const handler = createWebRTCHandler({
       mode,
+      iceServers: this.iceServers?.value,
       signal: this.abortController.signal,
       onConnected: (stream) => this.handleWebRTCConnected(stream),
       onDisconnected: () => this.handleWebRTCDisconnected(),
@@ -1659,6 +1662,7 @@ export class StreamConnection implements ReactiveStream {
 
     const handler = createBackchannelHandler({
       filterUdp: this.requestedMode.value === 'webrtc/tcp',
+      iceServers: this.iceServers?.value,
       signal: this.abortController.signal,
       onCandidate: (candidate) => this.sendWsMessage({ type: 'webrtc/candidate', value: candidate }),
       onConnected: async () => {
