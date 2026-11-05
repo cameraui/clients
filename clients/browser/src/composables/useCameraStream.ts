@@ -431,6 +431,21 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
         cached.cameraDeviceRef.value = camDevice;
       }
 
+      // the shared stream keeps the role of the player that opened it, a joining player asks for its own
+      const resolution = toValue(options.resolution) ?? 'high-resolution';
+      if (cached.stream.requestedResolution.value !== resolution) {
+        streamManager.updateMediaStream(camName, null);
+        cached.stream.setResolution(resolution);
+      }
+      cleanupFns.push(
+        watch(
+          () => toValue(options.resolution),
+          (role) => {
+            if (role) cached.stream.setResolution(role);
+          },
+        ),
+      );
+
       let video = cached.sharedVideoElement;
       if (!video) {
         video = createVideoElement();

@@ -17,6 +17,7 @@ interface FakeStream {
   paused: Ref<boolean>;
   start: Mock;
   stop: Mock;
+  setResolution: Mock;
 }
 
 vi.mock('../useCameraById.js', async () => {
@@ -32,13 +33,14 @@ vi.mock('../useFullscreen.js', async () => {
 vi.mock('../../streaming/streamConnection.js', async () => {
   const { ref } = await import('vue');
   const created: unknown[] = [];
-  function createStreamConnection() {
+  function createStreamConnection(options: { resolution?: { value: string } }) {
     const stream = {
       status: ref('idle'),
       isPlaying: ref(false),
       stalled: ref(false),
       activeMode: ref('webrtc'),
       activeResolution: ref('high-resolution'),
+      requestedResolution: ref(options.resolution?.value ?? 'high-resolution'),
       degradedFrom: ref(null),
       hasAudio: ref(false),
       hasBackchannel: ref(false),
@@ -496,5 +498,15 @@ describe('useCameraStream offscreen tiles', () => {
     await elapse(OFFSCREEN_STOP_MS + 100);
 
     expect(stream.stop).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('useCameraStream shared stream', () => {
+  it('gives a player that joins a shared stream the resolution it asks for', async () => {
+    const grid = await mountTile({ resolution: 'low-resolution' });
+    unmounts.shift()!();
+
+    await mountTile();
+    expect(grid.stream.setResolution).toHaveBeenCalledWith('high-resolution');
   });
 });
