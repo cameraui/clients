@@ -43,7 +43,7 @@
     "typescript-eslint": "^8.72.1",
     "unplugin-dts": "^1.1.2",
     "updates": "^20.0.0",
-    "vite": "^8.3.5",
+    "vite": "^8.3.6",
     "vitest": "^5.1.0"
   },
   "bugs": {
