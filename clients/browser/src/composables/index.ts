@@ -61,7 +61,7 @@ export {
 export { clearSnapshotCache, getSnapshotTimestamp, getSnapshotUrl, useSnapshot } from './useSnapshot.js';
 export { clearStorageCache, useCameraStorage, usePluginStorage, useSensorStorage } from './useStorage.js';
 export { useTabVisibility } from './useTabVisibility.js';
-export { useTerminal } from './useTerminal.js';
+export { useTerminal, useTerminalSessions } from './useTerminal.js';
 
 export type { UseCameraByIdReturn } from './useCameraById.js';
 export type { CameraStream, UseCameraStreamOptions } from './useCameraStream.js';
@@ -116,4 +116,4 @@ export type {
 export type { UseSnapshotReturn } from './useSnapshot.js';
 export type { ReactiveStorage, StorageRPC, UseStorageReturn } from './useStorage.js';
 export type { UseTabVisibilityReturn } from './useTabVisibility.js';
-export type { UseTerminalOptions, UseTerminalReturn } from './useTerminal.js';
+export type { UseTerminalOptions, UseTerminalReturn, UseTerminalSessionsReturn } from './useTerminal.js';

@@ -37,4 +37,9 @@ export type {
   SensorRefreshedState,
   StoredSensorData,
 } from '../../../../externals/camera.ui/server/src/rpc/interfaces/sensor.js';
-export type { TerminalManagerInterface, TerminalOptions, TerminalSessionInfo } from '../../../../externals/camera.ui/server/src/rpc/interfaces/terminal.js';
+export type {
+  TerminalManagerInterface,
+  TerminalOptions,
+  TerminalSessionInfo,
+  TerminalSessionUpdate,
+} from '../../../../externals/camera.ui/server/src/rpc/interfaces/terminal.js';

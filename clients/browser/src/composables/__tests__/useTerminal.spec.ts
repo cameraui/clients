@@ -6,6 +6,7 @@ import { useTerminal } from '../useTerminal.js';
 
 import type { RPCClient } from '@camera.ui/rpc';
 import type { ShallowRef } from 'vue';
+import type { TerminalOptions, TerminalSessionInfo } from '../../server/index.js';
 import type { CameraUiContext, CameraUiEventType } from '../../types.js';
 
 interface FakeStream {
@@ -71,14 +72,30 @@ function fakeStream(): FakeStream {
 function fakeServer() {
   let sessions = 0;
   const streams: FakeStream[] = [];
-  const createSession = vi.fn(async () => ({ sessionId: `s${++sessions}`, pid: 1, dimensions: { cols: 80, rows: 24 } }));
-  const closeSession = vi.fn(async (_sessionId: string) => {});
+  const kept = new Map<string, TerminalSessionInfo>();
+  const createSession = vi.fn(async (options?: TerminalOptions) => {
+    const session = { sessionId: `s${++sessions}`, pid: 1, dimensions: { cols: 80, rows: 24 }, name: options?.name, persistent: options?.persistent ?? false };
+    if (session.persistent) kept.set(session.sessionId, session);
+    return session;
+  });
+  const closeSession = vi.fn(async (sessionId: string) => {
+    kept.delete(sessionId);
+  });
   const generateOutput = vi.fn((_sessionId: string) => {
     const stream = fakeStream();
     streams.push(stream);
     return stream.iterator;
   });
-  const api = { createSession, closeSession, generateOutput, writeInput: vi.fn(async () => {}), resize: vi.fn(async () => {}) };
+  const listSessions = vi.fn(async () => [...kept.values()]);
+  const api = {
+    createSession,
+    closeSession,
+    generateOutput,
+    listSessions,
+    writeInput: vi.fn(async () => {}),
+    resize: vi.fn(async (_sessionId: string, _dimensions: { cols: number; rows: number }) => {}),
+    updateSession: vi.fn(async () => {}),
+  };
   const client = (): RPCClient => ({ createProxy: () => api }) as unknown as RPCClient;
   return { ...api, streams, client };
 }
@@ -259,6 +276,87 @@ describe('useTerminal', () => {
 
     expect(server.createSession).toHaveBeenCalledTimes(1);
     expect(result.error.value?.message).toBe('timed out');
+    stop();
+  });
+
+  it('leaves a kept session running on close and attaches to it with a replay', async () => {
+    const server = fakeServer();
+    const { context } = fakeContext(server.client());
+    const onReplay = vi.fn();
+    const { result, stop } = inContext(context, () => useTerminal());
+    await result.connect({ persistent: true, name: 'Build' });
+    await flush();
+    await result.close();
+
+    await result.connect({ sessionId: 's1', cols: 100, rows: 30, onReplay });
+    await flush();
+
+    expect(server.closeSession).not.toHaveBeenCalled();
+    expect(server.createSession).toHaveBeenCalledTimes(1);
+    expect(server.generateOutput).toHaveBeenCalledTimes(2);
+    expect(onReplay).toHaveBeenCalledTimes(1);
+    expect(server.resize).toHaveBeenCalledWith('s1', { cols: 100, rows: 30 });
+    stop();
+  });
+
+  it('attaches to a kept session again after an outage', async () => {
+    const server = fakeServer();
+    const { context, emit } = fakeContext(server.client());
+    const { result, stop } = inContext(context, () => useTerminal());
+    await result.connect({ persistent: true });
+    await flush();
+
+    emit('disconnected');
+    emit('reconnected');
+    await flush();
+
+    expect(server.closeSession).not.toHaveBeenCalled();
+    expect(server.createSession).toHaveBeenCalledTimes(1);
+    expect(server.generateOutput).toHaveBeenLastCalledWith('s1');
+    expect(result.isConnected.value).toBe(true);
+    stop();
+  });
+
+  it('opens a new shell when the kept session is gone', async () => {
+    const server = fakeServer();
+    const { context } = fakeContext(server.client());
+    const { result, stop } = inContext(context, () => useTerminal());
+
+    const onReplay = vi.fn();
+    await result.connect({ sessionId: 'gone', persistent: true, onReplay });
+    await flush();
+
+    expect(server.createSession).toHaveBeenCalledTimes(1);
+    expect(server.generateOutput).toHaveBeenLastCalledWith('s1');
+    expect(onReplay).not.toHaveBeenCalled();
+    stop();
+  });
+
+  it('keeps the server session when the stream of a kept one fails', async () => {
+    const server = fakeServer();
+    const { context } = fakeContext(server.client());
+    const { result, stop } = inContext(context, () => useTerminal());
+    await result.connect({ persistent: true, onError: () => {} });
+    await flush();
+
+    server.streams[0]!.fail(new Error('stream lost'));
+    await flush();
+
+    expect(server.closeSession).not.toHaveBeenCalled();
+    expect(result.isConnected.value).toBe(false);
+    stop();
+  });
+
+  it('ends a kept session on terminate', async () => {
+    const server = fakeServer();
+    const { context } = fakeContext(server.client());
+    const { result, stop } = inContext(context, () => useTerminal());
+    await result.connect({ persistent: true });
+    await flush();
+
+    await result.terminate();
+
+    expect(server.closeSession).toHaveBeenCalledWith('s1');
     stop();
   });
 });

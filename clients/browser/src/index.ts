@@ -76,6 +76,7 @@ export {
   useSnapshot,
   useTabVisibility,
   useTerminal,
+  useTerminalSessions,
   useTopmostFullscreenElement,
 } from './composables/index.js';
 
@@ -141,6 +142,7 @@ export type {
   UseTabVisibilityReturn,
   UseTerminalOptions,
   UseTerminalReturn,
+  UseTerminalSessionsReturn,
 } from './composables/index.js';
 
 export { createActivityMode, restartConnectedStreams, STREAM_CONFIG } from './streaming/index.js';
