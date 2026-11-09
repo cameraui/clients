@@ -18,5 +18,6 @@ export function useCoreManager(): ReactiveCoreManager {
     getCloudServerId: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getCloudServerId()),
     getRestoreGeneration: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getRestoreGeneration()),
     getInstanceId: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getInstanceId()),
+    getLanguage: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getLanguage()),
   };
 }
