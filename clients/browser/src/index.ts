@@ -153,6 +153,7 @@ export type {
   CameraActivityMode,
   CodecCompatibility,
   ReactiveStream,
+  StreamConnectionPath,
   StreamOptions,
   StreamStatus,
   VideoStreamingMode,

@@ -10,7 +10,17 @@ import { createSourceName } from '../server/index.js';
 import { STREAM_CONFIG } from './config.js';
 import { createMJPEGHandler, isJpegFrame } from './mjpeg.js';
 import { chaseLiveEdge, createMSEHandler, playVideo } from './mse.js';
-import { abortableSleep, canPlayH265, canPlayMjpeg, checkWebRTCCompatibility, isVideoInPictureInPicture, reportH265DecodeFailure, suspendsWhenHidden } from './utils.js';
+import { relayFirstAddress } from './relayFirst.js';
+import {
+  abortableSleep,
+  canPlayH265,
+  canPlayMjpeg,
+  checkWebRTCCompatibility,
+  hasMediaSource,
+  isVideoInPictureInPicture,
+  reportH265DecodeFailure,
+  suspendsWhenHidden,
+} from './utils.js';
 import { createBackchannelHandler, createWebRTCHandler, processWebRTCMessage } from './webrtc.js';
 
 import type { CameraSource, ProbeStream, StreamingRole } from '@camera.ui/sdk';
@@ -20,7 +30,7 @@ import type { ComputedRef, MaybeRefOrGetter, Ref, ShallowRef } from 'vue';
 import type { ReactiveCameraDevice } from '../types.js';
 import type { MJPEGHandler } from './mjpeg.js';
 import type { MSEErrorPhase, MSEHandler } from './mse.js';
-import type { ActiveStreamingMode, Go2RTCMessage, ReactiveStream, StreamDegradeReason, StreamStatus, VideoStreamingMode } from './types.js';
+import type { ActiveStreamingMode, Go2RTCMessage, ReactiveStream, StreamConnectionPath, StreamDegradeReason, StreamStatus, VideoStreamingMode } from './types.js';
 import type { BackchannelHandler, WebRTCHandler } from './webrtc.js';
 
 export interface StreamConnectionOptions {
@@ -44,6 +54,7 @@ const STALL_AFTER = 3000;
 const STALL_RECONNECT_AFTER = 15_000;
 const HAVE_CURRENT_DATA = 2;
 const PROBE_WAIT_MS = 2_000;
+const WEBRTC_RETRY_DELAYS = [30_000, 120_000, 600_000];
 
 type VideoWithFrameCallback = HTMLVideoElement & {
   requestVideoFrameCallback?: (callback: () => void) => number;
@@ -78,6 +89,8 @@ export class StreamConnection implements ReactiveStream {
   public readonly hasBackchannel: Ref<boolean>;
   public readonly isPlaying: Ref<boolean>;
   public readonly stalled: Ref<boolean>;
+  public readonly connectionPath: ComputedRef<StreamConnectionPath | undefined>;
+  public readonly webrtcUnreachable: Ref<boolean>;
   public readonly error: Ref<Error | undefined>;
   public readonly probeInfo: ShallowRef<ProbeStream | undefined>;
   public readonly muted: Ref<boolean>;
@@ -96,6 +109,7 @@ export class StreamConnection implements ReactiveStream {
   private readonly iceServers: Readonly<Ref<RTCIceServer[] | undefined>> | undefined;
   private readonly scope = effectScope(true);
   private readonly stopsWhenHidden = suspendsWhenHidden();
+  private readonly webrtcPath = ref<Exclude<StreamConnectionPath, 'tunnel'> | undefined>();
 
   private connectionGeneration = 0;
   private abortController = new AbortController();
@@ -133,6 +147,9 @@ export class StreamConnection implements ReactiveStream {
   private lastMediaTime = 0;
   private lastFrameCount: number | undefined;
   private frameCounterLive = false;
+  private webrtcRetries = 0;
+  private webrtcRetryDue = false;
+  private webrtcPlayingSince: number | undefined;
 
   private offTabVisible: (() => void) | undefined;
   private offTabPaused: (() => void) | undefined;
@@ -145,6 +162,10 @@ export class StreamConnection implements ReactiveStream {
   private stopConnectTimeout!: () => void;
   private startMseConnectTimeout!: () => void;
   private stopMseConnectTimeout!: () => void;
+  private startDisconnectGrace!: () => void;
+  private stopDisconnectGrace!: () => void;
+  private startWebRTCRetry!: () => void;
+  private stopWebRTCRetry!: () => void;
 
   constructor(options: StreamConnectionOptions) {
     this.options = options;
@@ -170,6 +191,7 @@ export class StreamConnection implements ReactiveStream {
     this.hasBackchannel = ref(false);
     this.isPlaying = ref(false);
     this.stalled = ref(false);
+    this.webrtcUnreachable = ref(false);
     this.error = ref<Error | undefined>();
     this.probeInfo = shallowRef<ProbeStream | undefined>();
     this.muted = ref(true);
@@ -183,6 +205,10 @@ export class StreamConnection implements ReactiveStream {
     this.videoElement = computed(() => toValue(options.videoElement));
     this.containerElement = computed(() => toValue(options.containerElement));
     this.isReady = computed(() => !!this.camera.value && !!this.videoElement.value && !!this.target.value);
+    this.connectionPath = computed(() => {
+      if (this.status.value !== 'connected') return undefined;
+      return this.activeMode.value === 'mse' || this.activeMode.value === 'mjpeg' ? 'tunnel' : this.webrtcPath.value;
+    });
 
     this.scope.run(() => {
       const { onTabPaused, onTabVisible } = useTabVisibility();
@@ -210,12 +236,9 @@ export class StreamConnection implements ReactiveStream {
       const connectTimeout = useTimeoutFn(
         () => {
           if (this.abortController.signal.aborted) return;
+          // a path that never formed says nothing about the codec, the source stays
           if (this.webrtcHandler && !this.webrtcHandler.isConnected) {
-            if (this.requestedMode.value === 'auto') {
-              this.fallBackToMSE();
-            } else {
-              this.retryAfterNoMedia();
-            }
+            this.handleWebRTCFailed(true);
           } else if (
             (this.webrtcHandler && this.awaitingWebRTCFrame) ||
             (this.mjpegHandler && !this.isPlaying.value) ||
@@ -244,12 +267,24 @@ export class StreamConnection implements ReactiveStream {
         { immediate: false },
       );
 
+      const disconnectGrace = useTimeoutFn(() => this.handleWebRTCLost(), STREAM_CONFIG.WEBRTC.DISCONNECT_GRACE, { immediate: false });
+
+      const webrtcRetry = useTimeoutFn(
+        () => this.retryWebRTC(),
+        () => WEBRTC_RETRY_DELAYS[Math.min(this.webrtcRetries, WEBRTC_RETRY_DELAYS.length - 1)],
+        { immediate: false },
+      );
+
       this.startWsConnectTimeout = wsConnectTimeout.start;
       this.stopWsConnectTimeout = wsConnectTimeout.stop;
       this.startConnectTimeout = connectTimeout.start;
       this.stopConnectTimeout = connectTimeout.stop;
       this.startMseConnectTimeout = mseConnectTimeout.start;
       this.stopMseConnectTimeout = mseConnectTimeout.stop;
+      this.startDisconnectGrace = disconnectGrace.start;
+      this.stopDisconnectGrace = disconnectGrace.stop;
+      this.startWebRTCRetry = webrtcRetry.start;
+      this.stopWebRTCRetry = webrtcRetry.stop;
 
       this.setupWatchers();
 
@@ -289,6 +324,11 @@ export class StreamConnection implements ReactiveStream {
         if (!pauseRan && hiddenMs >= hiddenStopDelay && this.status.value === 'connected') {
           log.debug(`onTabVisible: hidden for ${hiddenMs}ms without a stop, reconnecting`);
           this.restart();
+          return;
+        }
+        if (this.webrtcRetryDue) {
+          log.debug('onTabVisible: trying WebRTC again');
+          this.retryWebRTC();
           return;
         }
         log.debug('onTabVisible — not paused by visibility, no-op');
@@ -357,6 +397,9 @@ export class StreamConnection implements ReactiveStream {
     this.status.value = 'connecting';
     this.error.value = undefined;
     this.isPlaying.value = false;
+    this.webrtcUnreachable.value = false;
+    // runs alongside the socket setup, startWebRTC waits for it
+    if (this.requestedMode.value !== 'mse') relayFirstAddress(this.iceServers?.value);
 
     try {
       const init = this.initializeSource();
@@ -737,6 +780,11 @@ export class StreamConnection implements ReactiveStream {
     );
     this.stopWatchers.push(stopHealthWatch);
 
+    const stopPathWatch = watch(this.connectionPath, (path) => {
+      if (path) log.debug(`connection path: ${path}`);
+    });
+    this.stopWatchers.push(stopPathWatch);
+
     const stopCameraWatch = watch([this.camera, this.videoElement, () => this.target.value], ([newCamera, newVideo, newClient], [oldCamera, oldVideo]) => {
       if (newCamera !== oldCamera) {
         // while connecting, start() picks up the current camera itself
@@ -902,8 +950,7 @@ export class StreamConnection implements ReactiveStream {
     }
 
     if (this.requestedMode.value === 'auto' && this.activeMode.value !== 'mse' && !this.mjpegHandler && !this.mseRejected) {
-      this.webrtcHandler?.close();
-      this.webrtcHandler = undefined;
+      this.closeWebRTC();
       this.awaitingWebRTCFrame = false;
       this.activeMode.value = 'mse';
       this.isPlaying.value = false;
@@ -1166,7 +1213,7 @@ export class StreamConnection implements ReactiveStream {
         this.lastError = err;
         this.stopConnectTimeout();
         if (this.requestedMode.value === 'auto') {
-          this.fallBackToMSE();
+          this.fallBackToMSE(false);
         } else {
           this.retryLater(err);
         }
@@ -1214,11 +1261,16 @@ export class StreamConnection implements ReactiveStream {
     const handler = createWebRTCHandler({
       mode,
       iceServers: this.iceServers?.value,
+      relayFirst: relayFirstAddress(this.iceServers?.value),
       signal: this.abortController.signal,
       onConnected: (stream) => this.handleWebRTCConnected(stream),
+      onReconnected: () => this.handleWebRTCReconnected(),
       onDisconnected: () => this.handleWebRTCDisconnected(),
-      onFailed: () => this.handleWebRTCFailed(),
+      onFailed: () => this.handleWebRTCFailed(true),
       onCandidate: (candidate) => this.sendWsMessage({ type: 'webrtc/candidate', value: candidate }),
+      onPath: (path) => {
+        this.webrtcPath.value = path;
+      },
     });
     this.webrtcHandler = handler;
 
@@ -1231,15 +1283,17 @@ export class StreamConnection implements ReactiveStream {
   private handleWebRTCConnected(stream: MediaStream): void {
     if (this.abortController.signal.aborted) return;
 
+    this.stopDisconnectGrace();
     const video = this.videoElement.value;
     if (!video) return;
 
     // go2rtc answers audio-only when it cannot deliver the video codec, switching to it would freeze the picture for good
     if (this.hasVideo.value && stream.getVideoTracks().length === 0) {
-      this.handleWebRTCFailed();
+      this.handleWebRTCFailed(false);
       return;
     }
 
+    this.webrtcUnreachable.value = false;
     this.noteDeliveredAudio(stream.getAudioTracks().length > 0);
 
     // connectTimeout stays on as a first-frame watchdog until handleFirstFrame, a connected H.265 track can still decode to nothing
@@ -1270,36 +1324,48 @@ export class StreamConnection implements ReactiveStream {
   }
 
   private handleWebRTCDisconnected(): void {
-    if (this.status.value !== 'closed' && !this.abortController.signal.aborted) {
-      this.status.value = 'reconnecting';
+    if (this.status.value === 'closed' || this.abortController.signal.aborted) return;
 
-      if (this.requestedMode.value === 'auto' && this.mseHandler?.isReady) {
-        this.webrtcHandler?.close();
-        this.webrtcHandler = undefined;
-        this.activeMode.value = 'mse';
-        this.status.value = 'connected';
-        this.resumeBackchannel();
-      } else {
-        this.retryLater();
-      }
-    }
+    log.debug('WebRTC disconnected, waiting for it to come back');
+    // a peer still negotiating next to MSE has nothing on screen yet
+    if (this.activeMode.value !== 'mse') this.status.value = 'reconnecting';
+    this.startDisconnectGrace();
   }
 
-  private handleWebRTCFailed(): void {
+  private handleWebRTCReconnected(): void {
+    if (this.abortController.signal.aborted) return;
+
+    log.debug('WebRTC connected again');
+    this.stopDisconnectGrace();
+    this.status.value = 'connected';
+  }
+
+  private handleWebRTCLost(): void {
+    log.debug('WebRTC did not come back');
+    if (this.requestedMode.value !== 'auto' || this.mseRejected || !hasMediaSource()) {
+      this.retryLater();
+      return;
+    }
+    if (this.activeMode.value !== 'mse') this.isPlaying.value = false;
+    this.fallBackToMSE(true);
+  }
+
+  private handleWebRTCFailed(retryWebRTC: boolean): void {
     if (this.abortController.signal.aborted) return;
 
     this.stopConnectTimeout();
 
     if (this.requestedMode.value === 'auto') {
-      this.fallBackToMSE();
+      this.fallBackToMSE(retryWebRTC);
     } else {
       this.retryLater(this.lastError ?? new Error('WebRTC connection failed'));
     }
   }
 
-  private fallBackToMSE(): void {
-    this.webrtcHandler?.close();
-    this.webrtcHandler = undefined;
+  private fallBackToMSE(retryWebRTC: boolean): void {
+    this.closeWebRTC();
+    // a refused codec would fail the same over any path
+    this.webrtcUnreachable.value = retryWebRTC;
     this.awaitingWebRTCFrame = false;
     if (this.mseRejected) {
       this.retryLater(this.lastError);
@@ -1312,6 +1378,40 @@ export class StreamConnection implements ReactiveStream {
       this.startMSE();
     }
     this.resumeBackchannel();
+    if (retryWebRTC) this.scheduleWebRTCRetry();
+  }
+
+  private scheduleWebRTCRetry(): void {
+    if (this.webrtcPlayingSince !== undefined && performance.now() - this.webrtcPlayingSince >= RETRY_RESET_AFTER) {
+      this.webrtcRetries = 0;
+    }
+    this.webrtcPlayingSince = undefined;
+    this.startWebRTCRetry();
+  }
+
+  private retryWebRTC(): void {
+    if (isPageHidden()) {
+      this.webrtcRetryDue = true;
+      return;
+    }
+    this.webrtcRetryDue = false;
+    this.webrtcRetries++;
+
+    // an offer waiting for its answer or a talk peer holds the signaling of the socket
+    const signalingBusy = !!this.offerPeer || !!this.backchannelHandler;
+    if (this.requestedMode.value !== 'auto' || this.activeMode.value !== 'mse' || this.status.value !== 'connected' || this.webrtcHandler || signalingBusy) {
+      this.startWebRTCRetry();
+      return;
+    }
+    log.debug('trying WebRTC again while MSE plays');
+    this.startWebRTC('webrtc');
+  }
+
+  private closeWebRTC(): void {
+    this.stopDisconnectGrace();
+    this.webrtcHandler?.close();
+    this.webrtcHandler = undefined;
+    this.webrtcPath.value = undefined;
   }
 
   private startMSE(): void {
@@ -1523,6 +1623,7 @@ export class StreamConnection implements ReactiveStream {
     if (!this.webrtcHandler || this.webrtcHandler.isConnected) {
       this.stopConnectTimeout();
       this.awaitingWebRTCFrame = false;
+      if (this.webrtcHandler) this.webrtcPlayingSince = performance.now();
       this.resumeBackchannel();
     }
     this.error.value = undefined;
@@ -1620,6 +1721,10 @@ export class StreamConnection implements ReactiveStream {
     this.stopConnectTimeout();
     this.stopWsConnectTimeout();
     this.stopMseConnectTimeout();
+    this.stopWebRTCRetry();
+    this.webrtcRetryDue = false;
+    this.webrtcRetries = 0;
+    this.webrtcPlayingSince = undefined;
 
     this.stopHealthCheck();
     this.cancelFirstFrameWatch?.();
@@ -1627,8 +1732,7 @@ export class StreamConnection implements ReactiveStream {
 
     this.lastMediaStream = null;
 
-    this.webrtcHandler?.close();
-    this.webrtcHandler = undefined;
+    this.closeWebRTC();
 
     this.mseHandler?.close();
     this.mseHandler = undefined;
@@ -1663,6 +1767,7 @@ export class StreamConnection implements ReactiveStream {
     const handler = createBackchannelHandler({
       filterUdp: this.requestedMode.value === 'webrtc/tcp',
       iceServers: this.iceServers?.value,
+      relayFirst: relayFirstAddress(this.iceServers?.value),
       signal: this.abortController.signal,
       onCandidate: (candidate) => this.sendWsMessage({ type: 'webrtc/candidate', value: candidate }),
       onConnected: async () => {

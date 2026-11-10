@@ -3,7 +3,8 @@ export const STREAM_CONFIG = {
     RECONNECT_DELAY: 1000,
     CONNECT_TIMEOUT: 10000,
     WS_CONNECT_TIMEOUT: 5000,
-    ICE_SERVERS: [{ urls: 'stun:stun.l.google.com:19302' }],
+    DISCONNECT_GRACE: 5000,
+    ICE_SERVERS: [{ urls: 'stun:stun.cloudflare.com:3478' }],
   },
 
   MSE: {

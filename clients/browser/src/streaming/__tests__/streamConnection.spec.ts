@@ -3,7 +3,7 @@ import { effectScope, ref } from 'vue';
 
 import { STREAM_CONFIG } from '../config.js';
 import { StreamConnection } from '../streamConnection.js';
-import { reportH265DecodeFailure } from '../utils.js';
+import { canPlayH265, reportH265DecodeFailure } from '../utils.js';
 import {
   FakeCanvas,
   FakeImageDecoder,
@@ -26,7 +26,7 @@ import {
 import type { CameraSource, ProbeStream } from '@camera.ui/sdk';
 import type { ReactiveCameraDevice } from '../../types.js';
 import type { VideoStreamingMode } from '../types.js';
-import type { FakeWsHandle } from './fakes.js';
+import type { FakeCandidatePair, FakeWsHandle } from './fakes.js';
 
 const ctx = vi.hoisted(() => ({ target: undefined as unknown, wsTransport: undefined as unknown, iceServers: undefined as unknown }));
 const tab = vi.hoisted(() => ({
@@ -36,7 +36,10 @@ const tab = vi.hoisted(() => ({
 
 vi.mock('../../composables/useCameraUi.js', () => ({ useCameraUi: () => ctx }));
 vi.mock('../../server/index.js', () => ({ createSourceName: (camera: string, source: string) => `${camera}_${source}` }));
-vi.mock('../utils.js', async (importOriginal) => ({ ...(await importOriginal<object>()), reportH265DecodeFailure: vi.fn() }));
+vi.mock('../utils.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils.js')>();
+  return { ...actual, reportH265DecodeFailure: vi.fn(), canPlayH265: vi.fn(actual.canPlayH265) };
+});
 vi.mock('../../composables/useTabVisibility.js', () => ({
   DEFAULT_TAB_PAUSE_MS: 30_000,
   useTabVisibility: () => ({
@@ -56,6 +59,8 @@ const PROBE: ProbeStream = {
   video: [{ direction: 'sendonly', codec: 'H264' }],
   audio: [{ direction: 'sendonly', codec: 'opus' }],
 } as ProbeStream;
+const MIC = { kind: 'audio', readyState: 'live', stop: () => {} } as unknown as MediaStreamTrack;
+const GRACE = STREAM_CONFIG.WEBRTC.DISCONNECT_GRACE;
 const PROBE_WITH_TALK: ProbeStream = {
   video: [{ direction: 'sendonly', codec: 'H264' }],
   audio: [
@@ -114,12 +119,39 @@ async function feed(handle: FakeWsHandle, frames: number): Promise<void> {
   await settle();
 }
 
+async function resumeMse(handle: FakeWsHandle, video: FakeVideo): Promise<void> {
+  handle.serverText({ type: 'mse', value: H264_MIME });
+  handle.serverBinary(initSegment());
+  await feed(handle, 5);
+  video.advance(40);
+}
+
+async function playWebRTC(handle: FakeWsHandle, video: FakeVideo): Promise<FakePeerConnection> {
+  handle.serverOpen();
+  await settle();
+  handle.serverText({ type: 'webrtc/answer', value: 'picture-answer' });
+  const picture = FakePeerConnection.instances[0];
+  picture.connect();
+  await settle();
+  video.presentFrame();
+  return picture;
+}
+
+function mseRequests(handle: FakeWsHandle): number {
+  return handle.sentMessages().filter((m) => m.type === 'mse').length;
+}
+
+function offers(handle: FakeWsHandle): number {
+  return handle.sentMessages().filter((m) => m.type === 'webrtc/offer').length;
+}
+
 beforeEach(() => {
   installMediaGlobals();
   vi.stubGlobal('RTCPeerConnection', FakePeerConnection);
   vi.stubGlobal('MediaStream', FakeMediaStream);
   FakePeerConnection.instances = [];
   vi.mocked(reportH265DecodeFailure).mockClear();
+  vi.mocked(canPlayH265).mockReset();
   tab.paused.length = 0;
   tab.visible.length = 0;
   // retry delays at the top of their jitter range
@@ -250,17 +282,6 @@ describe('StreamConnection MSE failures', () => {
 });
 
 describe('StreamConnection auto mode', () => {
-  function mseRequests(handle: FakeWsHandle): number {
-    return handle.sentMessages().filter((m) => m.type === 'mse').length;
-  }
-
-  async function resumeMse(handle: FakeWsHandle, video: FakeVideo): Promise<void> {
-    handle.serverText({ type: 'mse', value: H264_MIME });
-    handle.serverBinary(initSegment());
-    await feed(handle, 5);
-    video.advance(40);
-  }
-
   it('still offers WebRTC when the browser has no MediaSource', async () => {
     delete (globalThis as { MediaSource?: unknown }).MediaSource;
     const { conn, ws, scope } = setup({ mode: 'auto' });
@@ -342,6 +363,361 @@ describe('StreamConnection auto mode', () => {
     await resumeMse(handle, video);
     expect(conn.status.value).toBe('connected');
     expect(conn.isPlaying.value).toBe(true);
+    scope.stop();
+  });
+});
+
+describe('StreamConnection WebRTC grace', () => {
+  it('keeps the WebRTC picture of a peer that comes back within the grace', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    const picture = await playWebRTC(handle, video);
+    expect(conn.activeMode.value).toBe('webrtc');
+
+    picture.setState('disconnected');
+    expect(conn.status.value).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(GRACE - 1000);
+    picture.setState('connected');
+    expect(conn.status.value).toBe('connected');
+    await vi.advanceTimersByTimeAsync(GRACE);
+
+    expect(conn.activeMode.value).toBe('webrtc');
+    expect(picture.closed).toBe(false);
+    expect(mseRequests(handle)).toBe(1);
+    expect(ws.handles).toHaveLength(1);
+    scope.stop();
+  });
+
+  it('falls back to MSE once a peer stayed away for the grace', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    const picture = await playWebRTC(handle, video);
+
+    picture.setState('disconnected');
+    await vi.advanceTimersByTimeAsync(GRACE - 1);
+    expect(picture.closed).toBe(false);
+    expect(mseRequests(handle)).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(picture.closed).toBe(true);
+    expect(conn.activeMode.value).toBe('mse');
+    expect(conn.isPlaying.value).toBe(false);
+    expect(mseRequests(handle)).toBe(2);
+
+    await resumeMse(handle, video);
+    expect(conn.status.value).toBe('connected');
+    expect(conn.isPlaying.value).toBe(true);
+    expect(ws.handles).toHaveLength(1);
+    scope.stop();
+  });
+
+  it('falls back to MSE at once when the peer fails during the grace', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    const picture = await playWebRTC(handle, video);
+
+    picture.setState('disconnected');
+    picture.setState('failed');
+
+    expect(picture.closed).toBe(true);
+    expect(conn.activeMode.value).toBe('mse');
+    expect(mseRequests(handle)).toBe(2);
+    scope.stop();
+  });
+
+  it('reconnects an explicit WebRTC stream only once the grace is over', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc' });
+    await conn.start();
+    const picture = await playWebRTC(ws.handles[0], video);
+
+    picture.setState('disconnected');
+    expect(conn.status.value).toBe('reconnecting');
+    await vi.advanceTimersByTimeAsync(GRACE - 1);
+    expect(picture.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(picture.closed).toBe(true);
+    expect(conn.status.value).toBe('reconnecting');
+    expect(conn.error.value).toBeUndefined();
+    await expectNextSocketAt(ws, 1000);
+    scope.stop();
+  });
+
+  it('keeps the H.265 source of an explicit WebRTC stream whose connection never forms', async () => {
+    vi.mocked(canPlayH265).mockReturnValue(true);
+    const { conn, ws, scope } = setup({
+      mode: 'webrtc',
+      sources: [
+        { _id: 'hevc', name: 'main', role: 'high-resolution', videoCodec: 'H265' } as CameraSource,
+        { _id: 'avc', name: 'sub', role: 'low-resolution', videoCodec: 'H264' } as CameraSource,
+      ],
+    });
+    await conn.start();
+    const handle = ws.handles[0];
+    handle.serverOpen();
+    await settle();
+    handle.serverText({ type: 'webrtc/answer', value: 'picture-answer' });
+    await vi.advanceTimersByTimeAsync(STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT);
+
+    const next = await expectNextSocketAt(ws, 1000);
+    expect(next.spec.query?.src).toBe('Garage_main');
+    expect(conn.degradedFrom.value).toBeNull();
+    scope.stop();
+  });
+});
+
+describe('StreamConnection WebRTC retry after an MSE fallback', () => {
+  async function keepPlaying(video: FakeVideo, ms: number): Promise<void> {
+    for (let elapsed = 0; elapsed < ms; elapsed += 1000) {
+      video.presentFrame();
+      await vi.advanceTimersByTimeAsync(Math.min(1000, ms - elapsed));
+    }
+  }
+
+  async function playMseWithoutWebRTC(handle: FakeWsHandle, video: FakeVideo): Promise<void> {
+    await playMse(handle, video);
+    handle.serverText({ type: 'webrtc/answer', value: 'picture-answer' });
+    await keepPlaying(video, STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT);
+    expect(FakePeerConnection.instances[0].closed).toBe(true);
+  }
+
+  it('tries WebRTC again after 30 s, 2 min and then every 10 min while MSE keeps playing', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMseWithoutWebRTC(handle, video);
+
+    for (const delay of [30_000, 120_000, 600_000, 600_000]) {
+      const before = offers(handle);
+      await keepPlaying(video, delay - 1000);
+      expect(offers(handle)).toBe(before);
+      await keepPlaying(video, 1000);
+      expect(offers(handle)).toBe(before + 1);
+      expect(conn.activeMode.value).toBe('mse');
+      handle.serverText({ type: 'webrtc/answer', value: 'retry-answer' });
+
+      await keepPlaying(video, STREAM_CONFIG.WEBRTC.CONNECT_TIMEOUT);
+      expect(FakePeerConnection.instances.at(-1)!.closed).toBe(true);
+      expect(conn.status.value).toBe('connected');
+      expect(conn.isPlaying.value).toBe(true);
+    }
+    expect(handle.sentMessages()).not.toContainEqual({ type: 'mse/stop' });
+    expect(ws.handles).toHaveLength(1);
+    scope.stop();
+  });
+
+  it('switches to WebRTC once a retry connects and stops trying', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMseWithoutWebRTC(handle, video);
+    await keepPlaying(video, 30_000);
+
+    handle.serverText({ type: 'webrtc/answer', value: 'retry-answer' });
+    const retry = FakePeerConnection.instances[1];
+    retry.connect();
+    await settle();
+    video.presentFrame();
+
+    expect(conn.activeMode.value).toBe('webrtc');
+    expect(conn.status.value).toBe('connected');
+    expect(handle.sentMessages()).toContainEqual({ type: 'mse/stop' });
+
+    await keepPlaying(video, 600_000);
+    expect(offers(handle)).toBe(2);
+    expect(retry.closed).toBe(false);
+    scope.stop();
+  });
+
+  it('starts over at 30 s after a WebRTC that held for a while', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMseWithoutWebRTC(handle, video);
+    await keepPlaying(video, 30_000);
+    handle.serverText({ type: 'webrtc/answer', value: 'retry-answer' });
+    FakePeerConnection.instances[1].connect();
+    await settle();
+    await keepPlaying(video, 60_000);
+
+    FakePeerConnection.instances[1].setState('failed');
+    await resumeMse(handle, video);
+    await keepPlaying(video, 30_000);
+
+    expect(offers(handle)).toBe(3);
+    expect(conn.status.value).toBe('connected');
+    scope.stop();
+  });
+
+  it('does not try WebRTC again after go2rtc answered without the video', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMse(handle, video);
+    handle.serverText({ type: 'webrtc/answer', value: 'picture-answer' });
+
+    FakePeerConnection.instances[0].connect(['audio']);
+    await settle();
+    expect(conn.activeMode.value).toBe('mse');
+    await keepPlaying(video, 30_000 + 120_000);
+
+    expect(offers(handle)).toBe(1);
+    scope.stop();
+  });
+
+  it('holds a retry while the page is hidden and tries once it is visible', async () => {
+    const page = { visibilityState: 'visible' };
+    vi.stubGlobal('document', page);
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMseWithoutWebRTC(handle, video);
+    await keepPlaying(video, 25_000);
+
+    page.visibilityState = 'hidden';
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(offers(handle)).toBe(1);
+
+    page.visibilityState = 'visible';
+    tab.visible[0]({ hiddenMs: 10_000 });
+    await settle();
+
+    expect(offers(handle)).toBe(2);
+    expect(ws.handles).toHaveLength(1);
+    scope.stop();
+  });
+
+  it('leaves the socket to a talk peer and tries at the next step', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto', probe: PROBE_WITH_TALK });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMseWithoutWebRTC(handle, video);
+
+    await conn.setMicrophone(MIC);
+    await settle();
+    expect(offers(handle)).toBe(2);
+    handle.serverText({ type: 'webrtc/answer', value: 'talk-answer' });
+    await keepPlaying(video, 30_000);
+    expect(offers(handle)).toBe(2);
+
+    await conn.setMicrophone(null);
+    await keepPlaying(video, 120_000);
+
+    expect(offers(handle)).toBe(3);
+    expect(FakePeerConnection.instances.at(-1)!.transceivers.map((t) => t.direction)).toEqual(['recvonly', 'recvonly']);
+    scope.stop();
+  });
+
+  it('marks WebRTC as unreachable while MSE stands in for a connection that never formed', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMseWithoutWebRTC(handle, video);
+    expect(conn.webrtcUnreachable.value).toBe(true);
+
+    await keepPlaying(video, 30_000);
+    handle.serverText({ type: 'webrtc/answer', value: 'retry-answer' });
+    FakePeerConnection.instances[1].connect();
+    await settle();
+
+    expect(conn.webrtcUnreachable.value).toBe(false);
+    scope.stop();
+  });
+
+  it('does not mark WebRTC as unreachable when go2rtc answered without the video', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMse(handle, video);
+    handle.serverText({ type: 'webrtc/answer', value: 'picture-answer' });
+
+    FakePeerConnection.instances[0].connect(['audio']);
+    await settle();
+
+    expect(conn.activeMode.value).toBe('mse');
+    expect(conn.webrtcUnreachable.value).toBe(false);
+    scope.stop();
+  });
+});
+
+describe('StreamConnection connection path', () => {
+  async function connectWith(pair: FakeCandidatePair, options: { firefoxStats?: boolean } = {}) {
+    const stream = setup({ mode: 'webrtc' });
+    await stream.conn.start();
+    stream.ws.handles[0].serverOpen();
+    await settle();
+    const pc = FakePeerConnection.instances[0];
+    pc.selectedPair = pair;
+    pc.firefoxStats = options.firefoxStats ?? false;
+    pc.connect();
+    await settle();
+    stream.video.presentFrame();
+    return { ...stream, pc };
+  }
+
+  it('reports a direct WebRTC connection', async () => {
+    const { conn, scope } = await connectWith({ local: 'host', remote: 'srflx' });
+
+    expect(conn.connectionPath.value).toBe('direct');
+    scope.stop();
+  });
+
+  it.each([
+    ['remote', { local: 'host', remote: 'relay' }],
+    ['local', { local: 'relay', remote: 'host' }],
+  ])('reports the relay when the %s candidate of the selected pair is one', async (_side, pair) => {
+    const { conn, scope } = await connectWith(pair);
+
+    expect(conn.connectionPath.value).toBe('relay');
+    scope.stop();
+  });
+
+  it('goes by the pair the browser flags as selected when it reports no transport', async () => {
+    const { conn, scope } = await connectWith({ local: 'prflx', remote: 'host' }, { firefoxStats: true });
+
+    expect(conn.connectionPath.value).toBe('direct');
+    scope.stop();
+  });
+
+  it('reads the path again when ICE moves to another pair or changes its state', async () => {
+    const { conn, pc, scope } = await connectWith({ local: 'host', remote: 'host' });
+
+    pc.switchPair({ local: 'host', remote: 'relay' });
+    await settle();
+    expect(conn.connectionPath.value).toBe('relay');
+
+    pc.setIceState({ local: 'srflx', remote: 'host' });
+    await settle();
+    expect(conn.connectionPath.value).toBe('direct');
+    scope.stop();
+  });
+
+  it('reports the tunnel while MSE plays and the WebRTC path once it takes over', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'auto' });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playMse(handle, video);
+    expect(conn.connectionPath.value).toBe('tunnel');
+
+    FakePeerConnection.instances[0].connect();
+    await settle();
+
+    expect(conn.connectionPath.value).toBe('direct');
+    scope.stop();
+  });
+
+  it('reports no path while WebRTC is away', async () => {
+    const { conn, pc, scope } = await connectWith({ local: 'host', remote: 'relay' });
+
+    pc.setState('disconnected');
+    expect(conn.connectionPath.value).toBeUndefined();
+
+    pc.setState('connected');
+    await settle();
+    expect(conn.connectionPath.value).toBe('relay');
     scope.stop();
   });
 });
@@ -899,23 +1275,6 @@ describe('StreamConnection go2rtc errors', () => {
 });
 
 describe('StreamConnection talkback', () => {
-  const MIC = { kind: 'audio', readyState: 'live', stop: () => {} } as unknown as MediaStreamTrack;
-
-  function offers(handle: FakeWsHandle): number {
-    return handle.sentMessages().filter((m) => m.type === 'webrtc/offer').length;
-  }
-
-  async function playWebRTC(handle: FakeWsHandle, video: FakeVideo): Promise<FakePeerConnection> {
-    handle.serverOpen();
-    await settle();
-    handle.serverText({ type: 'webrtc/answer', value: 'picture-answer' });
-    const picture = FakePeerConnection.instances[0];
-    picture.connect();
-    await settle();
-    video.presentFrame();
-    return picture;
-  }
-
   it('offers no microphone with a WebRTC picture', async () => {
     const { conn, ws, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK });
     await conn.start();
@@ -1171,6 +1530,52 @@ describe('StreamConnection talkback', () => {
     await conn.setMicrophone(null);
 
     expect(talk.closed).toBe(true);
+    scope.stop();
+  });
+
+  it('ends a talk whose peer does not come back within the grace', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK });
+    await conn.start();
+    const handle = ws.handles[0];
+    const picture = await playWebRTC(handle, video);
+
+    await conn.setMicrophone(MIC);
+    await settle();
+    const talk = FakePeerConnection.instances[1];
+    handle.serverText({ type: 'webrtc/answer', value: 'talk-answer' });
+    talk.setState('connected');
+    await settle();
+
+    talk.setState('disconnected');
+    await vi.advanceTimersByTimeAsync(GRACE - 1);
+    expect(talk.closed).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+
+    expect(talk.closed).toBe(true);
+    expect(picture.closed).toBe(false);
+    scope.stop();
+  });
+
+  it('keeps a talk whose peer comes back within the grace', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playWebRTC(handle, video);
+
+    await conn.setMicrophone(MIC);
+    await settle();
+    const talk = FakePeerConnection.instances[1];
+    handle.serverText({ type: 'webrtc/answer', value: 'talk-answer' });
+    talk.setState('connected');
+    await settle();
+
+    talk.setState('disconnected');
+    await vi.advanceTimersByTimeAsync(GRACE - 1000);
+    talk.setState('connected');
+    await vi.advanceTimersByTimeAsync(GRACE);
+
+    expect(talk.closed).toBe(false);
+    expect(talk.sendsTrack(MIC)).toBe(true);
     scope.stop();
   });
 

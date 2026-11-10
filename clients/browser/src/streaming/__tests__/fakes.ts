@@ -657,18 +657,27 @@ export interface FakeTransceiver {
   sender: { track: unknown; replaceTrack: (track: unknown) => Promise<void> };
 }
 
+export interface FakeCandidatePair {
+  local: string;
+  remote: string;
+}
+
 export class FakePeerConnection {
   static instances: FakePeerConnection[] = [];
 
   connectionState = 'new';
   onicecandidate: ((event: unknown) => void) | null = null;
   onconnectionstatechange: (() => void) | null = null;
+  oniceconnectionstatechange: (() => void) | null = null;
   closed = false;
   transceivers: FakeTransceiver[] = [];
   remoteAnswer: string | undefined;
   remoteCandidates: string[] = [];
+  selectedPair: FakeCandidatePair = { local: 'host', remote: 'host' };
+  firefoxStats = false;
 
   private received: FakeTrack['kind'][] = [];
+  private readonly iceTransport = new Emitter();
 
   constructor(public config?: RTCConfiguration) {
     FakePeerConnection.instances.push(this);
@@ -713,6 +722,33 @@ export class FakePeerConnection {
 
   getTransceivers(): unknown[] {
     return this.received.map((kind) => ({ currentDirection: 'recvonly', receiver: { track: { kind, readyState: 'live' } } }));
+  }
+
+  getReceivers(): unknown[] {
+    return [{ transport: { iceTransport: this.iceTransport } }];
+  }
+
+  async getStats(): Promise<Map<string, object>> {
+    const reports = new Map<string, object>([
+      ['pair-old', { type: 'candidate-pair', localCandidateId: 'local-old', remoteCandidateId: 'remote-old' }],
+      ['local-old', { type: 'local-candidate', candidateType: 'relay' }],
+      ['remote-old', { type: 'remote-candidate', candidateType: 'relay' }],
+      ['pair', { type: 'candidate-pair', localCandidateId: 'local', remoteCandidateId: 'remote', selected: this.firefoxStats || undefined }],
+      ['local', { type: 'local-candidate', candidateType: this.selectedPair.local }],
+      ['remote', { type: 'remote-candidate', candidateType: this.selectedPair.remote }],
+    ]);
+    if (!this.firefoxStats) reports.set('transport', { type: 'transport', selectedCandidatePairId: 'pair' });
+    return reports;
+  }
+
+  switchPair(pair: FakeCandidatePair): void {
+    this.selectedPair = pair;
+    this.iceTransport.emit('selectedcandidatepairchange');
+  }
+
+  setIceState(pair: FakeCandidatePair): void {
+    this.selectedPair = pair;
+    this.oniceconnectionstatechange?.();
   }
 
   connect(kinds: FakeTrack['kind'][] = ['video', 'audio']): void {

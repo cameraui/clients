@@ -10,6 +10,8 @@ export type StreamStatus = 'idle' | 'connecting' | 'connected' | 'reconnecting' 
 
 export type StreamDegradeReason = 'codec';
 
+export type StreamConnectionPath = 'direct' | 'relay' | 'tunnel';
+
 export interface StreamState {
   status: StreamStatus;
   activeMode: ActiveStreamingMode;
@@ -38,6 +40,8 @@ export interface ReactiveStream {
   readonly hasBackchannel: Ref<boolean>;
   readonly isPlaying: Ref<boolean>;
   readonly stalled?: Ref<boolean>;
+  readonly connectionPath?: Readonly<Ref<StreamConnectionPath | undefined>>;
+  readonly webrtcUnreachable?: Readonly<Ref<boolean>>;
   readonly error: Ref<Error | undefined>;
   readonly probeInfo: Ref<ProbeStream | undefined>;
   readonly muted: Ref<boolean>;

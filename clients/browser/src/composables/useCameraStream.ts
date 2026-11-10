@@ -14,7 +14,7 @@ import type { ComputedRef, HTMLAttributes, MaybeRefOrGetter, Ref, ShallowRef, Wa
 import type { ActivityModeConfig, CameraActivityMode } from '../streaming/activityMode.js';
 import type { StreamConnection } from '../streaming/streamConnection.js';
 import type { CachedStreamEntry } from '../streaming/streamManager.js';
-import type { ActiveStreamingMode, ReactiveStream, StreamStatus, VideoStreamingMode } from '../streaming/types.js';
+import type { ActiveStreamingMode, ReactiveStream, StreamConnectionPath, StreamStatus, VideoStreamingMode } from '../streaming/types.js';
 import type { ReactiveCameraDevice } from '../types.js';
 
 const AUTO_STAGGER_STEP_MS = 75;
@@ -45,6 +45,8 @@ export interface CameraStream {
   readonly status: Ref<StreamStatus>;
   readonly isPlaying: Ref<boolean>;
   readonly stalled: Ref<boolean>;
+  readonly connectionPath: Ref<StreamConnectionPath | undefined>;
+  readonly webrtcUnreachable: Ref<boolean>;
   readonly activeMode: Ref<ActiveStreamingMode>;
   readonly activeResolution: Ref<StreamingRole>;
   readonly degradedFrom: Ref<StreamingRole | null>;
@@ -181,6 +183,8 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   const status = computed<StreamStatus>(() => currentStream.value?.status.value ?? 'idle');
   const isPlaying = computed(() => currentStream.value?.isPlaying.value ?? false);
   const stalled = computed(() => currentStream.value?.stalled?.value ?? false);
+  const connectionPath = computed(() => currentStream.value?.connectionPath?.value);
+  const webrtcUnreachable = computed(() => currentStream.value?.webrtcUnreachable?.value ?? false);
   const activeMode = computed<ActiveStreamingMode>(() => currentStream.value?.activeMode.value ?? 'webrtc');
   const activeResolution = computed<StreamingRole>(() => currentStream.value?.activeResolution.value ?? 'low-resolution');
   const degradedFrom = computed(() => currentStream.value?.degradedFrom.value ?? null);
@@ -970,6 +974,8 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     status,
     isPlaying,
     stalled,
+    connectionPath,
+    webrtcUnreachable,
     activeMode,
     activeResolution,
     degradedFrom,
