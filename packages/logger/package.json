@@ -37,13 +37,13 @@
     "eslint": "9.39.2",
     "globals": "^17.14.0",
     "jiti": "^2.7.0",
-    "prettier": "^3.9.10",
+    "prettier": "^3.10.0",
     "rimraf": "^6.1.4",
     "typescript": "5.9.3",
     "typescript-eslint": "^8.72.2",
     "unplugin-dts": "^1.1.2",
     "updates": "^20.0.1",
-    "vite": "^8.3.7",
+    "vite": "^8.3.8",
     "vitest": "^5.1.0"
   },
   "bugs": {
