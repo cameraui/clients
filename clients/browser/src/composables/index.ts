@@ -5,7 +5,7 @@ export { useCameraStream } from './useCameraStream.js';
 export { useCameraUi } from './useCameraUi.js';
 export { useCoreManager } from './useCoreManager.js';
 export { useDeviceManager } from './useDeviceManager.js';
-export { setFullscreenRoot, useCuiFullscreen, useTopmostFullscreenElement } from './useFullscreen.js';
+export { setFullscreenRoot, setNativeFullscreen, useCuiFullscreen, useTopmostFullscreenElement } from './useFullscreen.js';
 export { clearOAuthCache, useOAuth } from './useOAuth.js';
 export { clearPluginCache, usePlugin } from './usePlugin.js';
 export { rpcCall, useRpcCall, useRpcSubscription } from './useRpc.js';
@@ -65,7 +65,7 @@ export { useTerminal, useTerminalSessions } from './useTerminal.js';
 
 export type { UseCameraByIdReturn } from './useCameraById.js';
 export type { CameraStream, UseCameraStreamOptions } from './useCameraStream.js';
-export type { UseCuiFullscreenOptions, UseCuiFullscreenReturn } from './useFullscreen.js';
+export type { NativeFullscreen, UseCuiFullscreenOptions, UseCuiFullscreenReturn } from './useFullscreen.js';
 export type { UseOAuthReturn } from './useOAuth.js';
 export type { UsePluginOptions, UsePluginReturn } from './usePlugin.js';
 export type { RpcCallOptions, UseRpcCallOptions, UseRpcCallReturn, UseRpcSubscriptionOptions, UseRpcSubscriptionReturn } from './useRpc.js';

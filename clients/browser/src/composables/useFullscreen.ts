@@ -12,11 +12,33 @@ interface FsState {
   scrollY: number;
 }
 
+export interface NativeFullscreen {
+  enter: () => Promise<boolean>;
+  exit: () => Promise<void>;
+}
+
+const documentFullscreen: NativeFullscreen = {
+  async enter() {
+    if (!document.fullscreenEnabled || document.fullscreenElement) return false;
+    await document.documentElement.requestFullscreen({ navigationUI: 'hide' });
+    return true;
+  },
+  async exit() {
+    if (document.fullscreenElement) await document.exitFullscreen();
+  },
+};
+
 const fsRegistry = new WeakMap<HTMLElement, FsState>();
 let fullscreenRoot: HTMLElement | null = null;
+let nativeFullscreen: NativeFullscreen | null = documentFullscreen;
+let nativeOwned = false;
 
 export function setFullscreenRoot(el: HTMLElement | null): void {
   fullscreenRoot = el;
+}
+
+export function setNativeFullscreen(native: NativeFullscreen | null): void {
+  nativeFullscreen = native;
 }
 
 const fullscreenStack: HTMLElement[] = [];
@@ -24,6 +46,28 @@ const topmostFullscreenWrapper = shallowRef<HTMLElement | null>(null);
 
 function refreshTopmost(): void {
   topmostFullscreenWrapper.value = fullscreenStack[fullscreenStack.length - 1] ?? null;
+}
+
+function enterNative(): void {
+  if (!nativeFullscreen || nativeOwned) return;
+  nativeOwned = true;
+  // the page goes native underneath the overlay, the browser's bars and the system's go with it
+  nativeFullscreen.enter().then(
+    (taken) => {
+      nativeOwned = taken;
+      // ours may have ended while the request was on its way
+      exitNative();
+    },
+    () => {
+      nativeOwned = false;
+    },
+  );
+}
+
+function exitNative(): void {
+  if (!nativeOwned || fullscreenStack.length > 0) return;
+  nativeOwned = false;
+  nativeFullscreen?.exit();
 }
 
 export function useTopmostFullscreenElement(): ComputedRef<HTMLElement | null> {
@@ -64,9 +108,16 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
     }
   }
 
+  function onNativeChange(): void {
+    // the browser's Esc or a system gesture ends native fullscreen, ours follows
+    if (nativeOwned && nativeFullscreen === documentFullscreen && !document.fullscreenElement) exit();
+  }
+
   async function enter(): Promise<void> {
     const el = currentEl.value;
     if (!el || isFullscreen.value) return;
+
+    enterNative();
 
     const wrapper = document.createElement('div');
     wrapper.className = `cui-fullscreen cui-fullscreen-${mode}`;
@@ -96,6 +147,7 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
     window.scrollTo({ top: 0, behavior: 'instant' });
 
     document.addEventListener('keydown', onEscape);
+    document.addEventListener('fullscreenchange', onNativeChange);
 
     fullscreenStack.push(wrapper);
     refreshTopmost();
@@ -125,10 +177,12 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
     window.scrollTo({ top: state.scrollY, behavior: 'instant' });
 
     document.removeEventListener('keydown', onEscape);
+    document.removeEventListener('fullscreenchange', onNativeChange);
 
     const stackIndex = fullscreenStack.indexOf(state.wrapper);
     if (stackIndex !== -1) fullscreenStack.splice(stackIndex, 1);
     refreshTopmost();
+    exitNative();
 
     isFullscreen.value = false;
   }
@@ -143,6 +197,7 @@ export function useCuiFullscreen(target: MaybeRefOrGetter<HTMLElement | null | u
       exit();
     }
     document.removeEventListener('keydown', onEscape);
+    document.removeEventListener('fullscreenchange', onNativeChange);
   });
 
   return {

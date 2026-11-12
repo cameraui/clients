@@ -48,6 +48,7 @@ export {
   resetClientState,
   rpcCall,
   setFullscreenRoot,
+  setNativeFullscreen,
   useAllSensors,
   useAudioSensor,
   useCameraById,
@@ -82,6 +83,7 @@ export {
 
 export type {
   CameraStream,
+  NativeFullscreen,
   ReactiveAudioSensor,
   ReactiveBatteryInfo,
   ReactiveCarbonDioxideInfo,
