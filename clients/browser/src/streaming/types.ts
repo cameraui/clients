@@ -38,6 +38,7 @@ export interface ReactiveStream {
   readonly hasVideo: Ref<boolean>;
   readonly hasAudio: Ref<boolean>;
   readonly hasBackchannel: Ref<boolean>;
+  readonly hasMicrophone?: Readonly<Ref<boolean>>;
   readonly isPlaying: Ref<boolean>;
   readonly stalled?: Ref<boolean>;
   readonly connectionPath?: Readonly<Ref<StreamConnectionPath | undefined>>;

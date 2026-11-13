@@ -53,6 +53,7 @@ export interface CameraStream {
   readonly unsupported: Ref<boolean>;
   readonly hasAudio: Ref<boolean>;
   readonly hasBackchannel: Ref<boolean>;
+  readonly hasMicrophone: Ref<boolean>;
   readonly error: Ref<Error | undefined>;
   readonly isReconnecting: Ref<boolean>;
   readonly activityMode: Ref<CameraActivityMode>;
@@ -191,6 +192,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
   const unsupported = computed(() => status.value === 'unsupported');
   const hasAudio = computed(() => currentStream.value?.hasAudio.value ?? false);
   const hasBackchannel = computed(() => currentStream.value?.hasBackchannel.value ?? false);
+  const hasMicrophone = computed(() => currentStream.value?.hasMicrophone?.value ?? false);
   const error = computed(() => currentStream.value?.error.value);
   const isReconnecting = computed(() => status.value === 'reconnecting');
   const isBusy = computed(() => cameraDeviceLoading.value || (!isPlaying.value && status.value !== 'error' && status.value !== 'unsupported'));
@@ -982,6 +984,7 @@ export function useCameraStream(options: UseCameraStreamOptions): CameraStream {
     unsupported,
     hasAudio,
     hasBackchannel,
+    hasMicrophone,
     error,
     isReconnecting,
     activityMode: activityModeManager.mode,

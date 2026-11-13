@@ -1649,6 +1649,79 @@ describe('StreamConnection talkback', () => {
     scope.stop();
   });
 
+  it('holds a microphone from the hand-over until it is taken back', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK });
+    await conn.start();
+    await playWebRTC(ws.handles[0], video);
+    expect(conn.hasMicrophone.value).toBe(false);
+
+    await conn.setMicrophone(MIC);
+    expect(conn.hasMicrophone.value).toBe(true);
+
+    await conn.setMicrophone(null);
+    expect(conn.hasMicrophone.value).toBe(false);
+    scope.stop();
+  });
+
+  it('takes no microphone for a camera without talk', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc' });
+    await conn.start();
+    await playWebRTC(ws.handles[0], video);
+
+    await conn.setMicrophone(MIC);
+
+    expect(conn.hasMicrophone.value).toBe(false);
+    scope.stop();
+  });
+
+  it('gives the microphone up when the talk peer fails', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playWebRTC(handle, video);
+    await conn.setMicrophone(MIC);
+    await settle();
+    const talk = FakePeerConnection.instances[1];
+    handle.serverText({ type: 'webrtc/answer', value: 'talk-answer' });
+    talk.setState('connected');
+    await settle();
+
+    talk.setState('failed');
+
+    expect(conn.hasMicrophone.value).toBe(false);
+    expect(conn.status.value).toBe('connected');
+    scope.stop();
+  });
+
+  it('gives the microphone up when go2rtc refuses the talk offer', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK });
+    await conn.start();
+    const handle = ws.handles[0];
+    await playWebRTC(handle, video);
+    await conn.setMicrophone(MIC);
+    await settle();
+
+    handle.serverText({ type: 'error', value: 'webrtc/offer: backchannel: no supported codec' });
+
+    expect(conn.hasMicrophone.value).toBe(false);
+    scope.stop();
+  });
+
+  it('gives the microphone up when the stream reconnects', async () => {
+    const { conn, ws, video, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK });
+    await conn.start();
+    await playWebRTC(ws.handles[0], video);
+    await conn.setMicrophone(MIC);
+    await settle();
+
+    const restarted = conn.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    await restarted;
+
+    expect(conn.hasMicrophone.value).toBe(false);
+    scope.stop();
+  });
+
   it('closes a talk peer whose connection failed', async () => {
     const { conn, ws, video, scope } = setup({ mode: 'webrtc', probe: PROBE_WITH_TALK });
     await conn.start();

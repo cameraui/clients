@@ -87,6 +87,7 @@ export class StreamConnection implements ReactiveStream {
   public readonly hasVideo: Ref<boolean>;
   public readonly hasAudio: Ref<boolean>;
   public readonly hasBackchannel: Ref<boolean>;
+  public readonly hasMicrophone: ComputedRef<boolean>;
   public readonly isPlaying: Ref<boolean>;
   public readonly stalled: Ref<boolean>;
   public readonly connectionPath: ComputedRef<StreamConnectionPath | undefined>;
@@ -130,7 +131,7 @@ export class StreamConnection implements ReactiveStream {
   private cancelFirstFrameWatch: (() => void) | undefined;
   private awaitingWebRTCFrame = false;
   private backchannelHandler: BackchannelHandler | undefined;
-  private pendingMicTrack: MediaStreamTrack | null = null;
+  private readonly micTrack = shallowRef<MediaStreamTrack | null>(null);
   private offerPeer: SignalingPeer | undefined;
   private answeredPeer: SignalingPeer | undefined;
   private lastMediaStream: MediaStream | null = null;
@@ -190,6 +191,7 @@ export class StreamConnection implements ReactiveStream {
     this.hasVideo = ref(false);
     this.hasAudio = ref(false);
     this.hasBackchannel = ref(false);
+    this.hasMicrophone = computed(() => this.micTrack.value !== null);
     this.isPlaying = ref(false);
     this.stalled = ref(false);
     this.webrtcUnreachable = ref(false);
@@ -522,7 +524,7 @@ export class StreamConnection implements ReactiveStream {
     }
     if (!this.hasBackchannel.value) return;
 
-    this.pendingMicTrack = track;
+    this.micTrack.value = track;
     if (!this.backchannelHandler) {
       await this.startBackchannel();
     } else if (this.backchannelHandler.isConnected) {
@@ -1775,8 +1777,8 @@ export class StreamConnection implements ReactiveStream {
       signal: this.abortController.signal,
       onCandidate: (candidate) => this.sendWsMessage({ type: 'webrtc/candidate', value: candidate }),
       onConnected: async () => {
-        if (this.pendingMicTrack && this.backchannelHandler === handler) {
-          await handler.setMicrophoneTrack(this.pendingMicTrack);
+        if (this.micTrack.value && this.backchannelHandler === handler) {
+          await handler.setMicrophoneTrack(this.micTrack.value);
         }
       },
       onFailed: () => this.closeBackchannel(handler),
@@ -1796,7 +1798,7 @@ export class StreamConnection implements ReactiveStream {
   }
 
   private resumeBackchannel(): void {
-    if (this.pendingMicTrack && !this.backchannelHandler) this.startBackchannel();
+    if (this.micTrack.value && !this.backchannelHandler) this.startBackchannel();
   }
 
   private sendOffer(peer: SignalingPeer, sdp: string): void {
@@ -1819,7 +1821,7 @@ export class StreamConnection implements ReactiveStream {
     handler?.close();
     if (handler !== this.backchannelHandler) return;
     this.backchannelHandler = undefined;
-    this.pendingMicTrack = null;
+    this.micTrack.value = null;
   }
 }
 
