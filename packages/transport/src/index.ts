@@ -14,7 +14,7 @@ export { attachWorkerBridge } from './effects/workerBridge.js';
 export { createConnectionJournal } from './journal.js';
 export { raceFirst } from './race.js';
 export { createConnectionSignal } from './signal.js';
-export { classifyClose } from './transports/closeCodes.js';
+export { classifyClose, refusedByServer } from './transports/closeCodes.js';
 export { isEndpointChange, isSameTarget, TransportEmitter } from './transports/contract.js';
 
 export type { Kernel, KernelOptions, Listener, Unsubscribe } from './core/kernel.js';

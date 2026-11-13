@@ -224,11 +224,12 @@ describe('nats transport: close codes at first contact', () => {
     expect(authErrors).not.toHaveBeenCalled();
     expect(t.health().up).toBe(false);
     expect(t.health().lastError).toMatch(/^forbidden/);
+    expect(t.health().refused).toBe(true);
 
     onDial = (c) => c.open();
     await t.apply(A_ROTATED);
     expect(clients).toHaveLength(2);
-    expect(t.health().up).toBe(true);
+    expect(t.health()).toEqual({ up: true });
   });
 
   it('4401 reports the rejected token once and waits for a new one', async () => {

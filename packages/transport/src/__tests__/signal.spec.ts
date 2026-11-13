@@ -110,6 +110,46 @@ describe('createConnectionSignal', () => {
     }
   });
 
+  it('a channel the server refused for the session is not degraded, the other one still counts', async () => {
+    vi.useFakeTimers();
+    try {
+      const { socketio, nats, handle } = setup(onlinePhase());
+      await socketio.apply({ endpoint: LAN, tokens: TOKENS });
+      nats.emitRefused('forbidden: password change required');
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(handle.current.kind).toBe('online');
+
+      socketio.emitDown('transport error');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(handle.current).toEqual({ kind: 'degraded', channels: ['socketio'] });
+
+      socketio.emitUp();
+      nats.emitDown('disconnect');
+      await vi.advanceTimersByTimeAsync(1_100);
+      expect(handle.current).toEqual({ kind: 'degraded', channels: ['nats'] });
+      handle.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a refused channel does not hold the first connect back', async () => {
+    vi.useFakeTimers();
+    try {
+      const { socketio, nats, handle } = setup(onlinePhase());
+      nats.emitRefused('forbidden: password change required');
+      expect(handle.current.kind).toBe('connecting');
+
+      await socketio.apply({ endpoint: LAN, tokens: TOKENS });
+      expect(handle.current.kind).toBe('online');
+      await vi.advanceTimersByTimeAsync(20_000);
+      expect(handle.current.kind).toBe('online');
+      handle.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('needs-auth applies instantly', () => {
     const { kernel, handle } = setup(onlinePhase());
     kernel.dispatch({ type: 'TOKENS_INVALID', reason: 'rejected' });

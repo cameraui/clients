@@ -194,9 +194,9 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
     emitter.emit('up', undefined);
   }
 
-  function markDown(reason: string): void {
+  function markDown(reason: string, refused = false): void {
     if (!status.up && status.lastError === reason) return;
-    status = { up: false, lastError: reason };
+    status = refused ? { up: false, lastError: reason, refused } : { up: false, lastError: reason };
     logger?.debug(`markDown (${reason})`);
     emitter.emit('down', { reason });
   }
@@ -290,7 +290,7 @@ export function createNatsTransport(options: NatsTransportOptions = {}): NatsTra
       }
     }
     logger?.warn(`forbidden by server: ${message}`);
-    markDown(forbiddenError(message));
+    markDown(forbiddenError(message), true);
     if (dropped) notifyClient();
   }
 

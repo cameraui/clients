@@ -1,5 +1,5 @@
 import type { Kernel } from './core/kernel.js';
-import type { TransportId } from './core/types.js';
+import type { TransportId, TransportStatus } from './core/types.js';
 import type { Transport } from './transports/contract.js';
 
 export type ConnectionSignal =
@@ -34,6 +34,10 @@ export function signalEquals(a: ConnectionSignal, b: ConnectionSignal): boolean 
   return true;
 }
 
+function isDegraded(status: TransportStatus): boolean {
+  return !status.up && !status.refused;
+}
+
 export function createConnectionSignal(options: ConnectionSignalOptions): ConnectionSignalHandle {
   const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
   const firstConnectTimeoutMs = options.firstConnectTimeoutMs ?? DEFAULT_FIRST_CONNECT_TIMEOUT_MS;
@@ -59,7 +63,7 @@ export function createConnectionSignal(options: ConnectionSignalOptions): Connec
       case 'discovering':
         return hasBeenOnline ? { kind: 'offline' } : { kind: 'connecting' };
       case 'online': {
-        const channels = options.transports.filter((t) => t.spec.phaseGating && !t.health().up).map((t) => t.spec.id);
+        const channels = options.transports.filter((t) => t.spec.phaseGating && isDegraded(t.health())).map((t) => t.spec.id);
         if (channels.length === 0) return { kind: 'online' };
         if (anyChannelEverUp) return { kind: 'degraded', channels };
         // a first connect is not degraded until it takes long enough to point at a blocked path, like a proxy without websocket upgrade

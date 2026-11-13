@@ -70,6 +70,11 @@ export class FakeTransport implements Transport {
     this.emitter.emit('down', { reason });
   }
 
+  emitRefused(reason: string): void {
+    this.currentStatus = { up: false, lastError: reason, refused: true };
+    this.emitter.emit('down', { reason });
+  }
+
   emitUp(): void {
     this.currentStatus = { up: true };
     this.emitter.emit('up', undefined);

@@ -38,6 +38,7 @@ export interface TransportStatus {
   readonly up: boolean;
   readonly lastError?: string;
   readonly downSince?: number;
+  readonly refused?: boolean;
 }
 
 export type ConnectionPhase =
