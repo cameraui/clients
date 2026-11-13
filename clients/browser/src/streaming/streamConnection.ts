@@ -592,7 +592,7 @@ export class StreamConnection implements ReactiveStream {
   }
 
   public restart(): Promise<void> {
-    return this.reconnect(1000);
+    return this.reconnect(0);
   }
 
   public invalidateProbe(): void {
@@ -659,7 +659,7 @@ export class StreamConnection implements ReactiveStream {
 
   private retryAfterNoMedia(): void {
     if (this.markSourceUndecodable()) {
-      this.restart();
+      this.reconnect(RETRY_BASE_DELAY);
       return;
     }
     this.retryLater(this.lastError);
@@ -1492,7 +1492,7 @@ export class StreamConnection implements ReactiveStream {
     if ((phase === 'setup' || beforeFirstFrame) && this.sourceLikelyH265()) {
       reportH265DecodeFailure('mse');
       this.markSourceUndecodable();
-      this.restart();
+      this.reconnect(RETRY_BASE_DELAY);
       return;
     }
 

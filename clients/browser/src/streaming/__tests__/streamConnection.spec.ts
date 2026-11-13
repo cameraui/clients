@@ -737,6 +737,68 @@ describe('StreamConnection stop', () => {
   });
 });
 
+describe('StreamConnection deliberate switches', () => {
+  it('dials at once when the mode is switched', async () => {
+    const { conn, ws, video, scope } = setup();
+    await conn.start();
+    await playMse(ws.handles[0], video);
+
+    const switched = conn.setMode('webrtc');
+    await vi.advanceTimersByTimeAsync(0);
+    await switched;
+
+    expect(ws.handles[0].disposed).toBe(true);
+    expect(ws.handles).toHaveLength(2);
+    scope.stop();
+  });
+
+  it('dials at once when the resolution is switched', async () => {
+    const { conn, ws, video, scope } = setup({
+      sources: [H264_SOURCE, { _id: 'sub', name: 'sub', role: 'low-resolution', videoCodec: 'H264' } as CameraSource],
+    });
+    await conn.start();
+    await playMse(ws.handles[0], video);
+
+    const switched = conn.setResolution('low-resolution');
+    await vi.advanceTimersByTimeAsync(0);
+    await switched;
+
+    expect(ws.handles).toHaveLength(2);
+    expect(ws.handles[1].spec.query?.src).toBe('Garage_sub');
+    scope.stop();
+  });
+
+  it('dials at once when asked to restart', async () => {
+    const { conn, ws, video, scope } = setup();
+    await conn.start();
+    await playMse(ws.handles[0], video);
+
+    const restarted = conn.restart();
+    await vi.advanceTimersByTimeAsync(0);
+    await restarted;
+
+    expect(ws.handles).toHaveLength(2);
+    scope.stop();
+  });
+
+  it('dials once for two switches in a row', async () => {
+    const { conn, ws, video, scope } = setup({
+      sources: [H264_SOURCE, { _id: 'sub', name: 'sub', role: 'low-resolution', videoCodec: 'H264' } as CameraSource],
+    });
+    await conn.start();
+    await playMse(ws.handles[0], video);
+
+    const switched = Promise.all([conn.setResolution('low-resolution'), conn.setMode('webrtc')]);
+    await vi.advanceTimersByTimeAsync(0);
+    await switched;
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(ws.handles).toHaveLength(2);
+    expect(ws.handles[1].spec.query?.src).toBe('Garage_sub');
+    scope.stop();
+  });
+});
+
 describe('StreamConnection reconnect policy', () => {
   it('backs off with growing delays while the socket keeps dropping', async () => {
     const { conn, ws, scope } = setup();
@@ -1101,7 +1163,8 @@ describe('StreamConnection stall watchdog', () => {
     tab.visible[0]({ hiddenMs: 60_000 });
 
     expect(conn.status.value).toBe('reconnecting');
-    await expectNextSocketAt(ws, 1000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(ws.handles).toHaveLength(2);
     scope.stop();
   });
 
