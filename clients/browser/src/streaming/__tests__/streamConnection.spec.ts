@@ -799,6 +799,100 @@ describe('StreamConnection deliberate switches', () => {
   });
 });
 
+describe('StreamConnection switches while connecting', () => {
+  const SUB_SOURCE = { _id: 'sub', name: 'sub', role: 'low-resolution', videoCodec: 'H264' } as CameraSource;
+
+  it('dials the new source when the resolution changes before the socket is open', async () => {
+    const { conn, ws, video, scope } = setup({ sources: [H264_SOURCE, SUB_SOURCE] });
+    await conn.start();
+
+    const switched = conn.setResolution('low-resolution');
+    await vi.advanceTimersByTimeAsync(0);
+    await switched;
+    const last = ws.handles.at(-1)!;
+    await playMse(last, video);
+
+    expect(ws.handles[0].disposed).toBe(true);
+    expect(last.spec.query?.src).toBe('Garage_sub');
+    expect(conn.status.value).toBe('connected');
+    expect(conn.activeResolution.value).toBe('low-resolution');
+    scope.stop();
+  });
+
+  it('dials the new source when the resolution changes while the stream is being negotiated', async () => {
+    const { conn, ws, video, scope } = setup({ sources: [H264_SOURCE, SUB_SOURCE] });
+    await conn.start();
+    ws.handles[0].serverOpen();
+    await settle();
+
+    const switched = conn.setResolution('low-resolution');
+    await vi.advanceTimersByTimeAsync(0);
+    await switched;
+    const last = ws.handles.at(-1)!;
+    await playMse(last, video);
+
+    expect(ws.handles).toHaveLength(2);
+    expect(last.spec.query?.src).toBe('Garage_sub');
+    expect(conn.status.value).toBe('connected');
+    scope.stop();
+  });
+
+  it('asks in the new mode when it changes after the stream was requested', async () => {
+    const { conn, ws, scope } = setup();
+    await conn.start();
+    ws.handles[0].serverOpen();
+    await settle();
+    expect(mseRequests(ws.handles[0])).toBe(1);
+
+    const switched = conn.setMode('webrtc');
+    await vi.advanceTimersByTimeAsync(0);
+    await switched;
+    const last = ws.handles.at(-1)!;
+    last.serverOpen();
+    await settle();
+
+    expect(ws.handles).toHaveLength(2);
+    expect(ws.handles[0].disposed).toBe(true);
+    expect(offers(last)).toBe(1);
+    expect(mseRequests(last)).toBe(0);
+    scope.stop();
+  });
+
+  it('keeps the socket when the mode changes before the stream was requested', async () => {
+    const { conn, ws, scope } = setup();
+    await conn.start();
+
+    const switched = conn.setMode('webrtc');
+    await vi.advanceTimersByTimeAsync(0);
+    await switched;
+    ws.handles[0].serverOpen();
+    await settle();
+
+    expect(ws.handles).toHaveLength(1);
+    expect(offers(ws.handles[0])).toBe(1);
+    expect(mseRequests(ws.handles[0])).toBe(0);
+    scope.stop();
+  });
+
+  it('dials once when the resolution changes while the first probe is out', async () => {
+    const { conn, ws, scope, camera } = setup({ sources: [H264_SOURCE, SUB_SOURCE] });
+    let answer: (probe: ProbeStream) => void = () => {};
+    vi.mocked(camera.probeStream).mockImplementationOnce(() => new Promise<ProbeStream>((resolve) => (answer = resolve)));
+    const started = conn.start();
+    await settle();
+
+    const switched = conn.setResolution('low-resolution');
+    await vi.advanceTimersByTimeAsync(0);
+    answer(PROBE);
+    await Promise.all([started, switched]);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(ws.handles.filter((handle) => !handle.disposed)).toHaveLength(1);
+    expect(ws.handles.at(-1)!.spec.query?.src).toBe('Garage_sub');
+    scope.stop();
+  });
+});
+
 describe('StreamConnection reconnect policy', () => {
   it('backs off with growing delays while the socket keeps dropping', async () => {
     const { conn, ws, scope } = setup();
@@ -1936,9 +2030,10 @@ describe('StreamConnection probe', () => {
 
     const starting = conn.start();
     await settle();
-    await conn.setResolution('low-resolution');
+    const switched = conn.setResolution('low-resolution');
+    await vi.advanceTimersByTimeAsync(0);
     fail();
-    await starting;
+    await Promise.all([starting, switched]);
 
     expect(ws.handles).toHaveLength(2);
     expect(ws.handles[0].disposed).toBe(true);

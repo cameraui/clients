@@ -120,6 +120,7 @@ export class StreamConnection implements ReactiveStream {
   private hiddenPauseRan = false;
   private disarmPipWatch: (() => void) | null = null;
   private wsHandle: WsHandle | undefined;
+  private streamRequested = false;
   private wsOpenedAt = 0;
   private webrtcHandler: WebRTCHandler | undefined;
   private mseHandler: MSEHandler | undefined;
@@ -482,8 +483,8 @@ export class StreamConnection implements ReactiveStream {
       return;
     }
 
-    // while connecting, start() picks up the new refs in handleWsOpen()
-    if (this.status.value === 'connected') {
+    // before the request went out, requestStream() reads the new mode
+    if (this.status.value === 'connected' || this.streamRequested) {
       await this.restart();
     }
   }
@@ -507,8 +508,8 @@ export class StreamConnection implements ReactiveStream {
       this.degradedFrom.value = result.degradedFrom;
       this.degradeReason.value = result.degradedFrom ? 'codec' : null;
 
-      // while connecting, start() re-reads the source after its probe and dials again on a change
-      if (this.status.value === 'connected') {
+      // a socket is dialled for one source, also while it still connects
+      if (this.status.value === 'connected' || this.wsHandle) {
         await this.restart();
       }
     }
@@ -1072,6 +1073,7 @@ export class StreamConnection implements ReactiveStream {
 
   private disconnectWebSocket(): void {
     this.stopWsConnectTimeout();
+    this.streamRequested = false;
     if (this.wsHandle) {
       this.wsHandle.dispose();
       this.wsHandle = undefined;
@@ -1099,6 +1101,8 @@ export class StreamConnection implements ReactiveStream {
   }
 
   private requestStream(): void {
+    this.streamRequested = true;
+
     // go2rtc has no WebRTC or MSE consumer for JPEG
     if (this.sourceIsMjpeg()) {
       this.startMjpeg();
