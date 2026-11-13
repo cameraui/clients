@@ -1316,7 +1316,7 @@ export class StreamConnection implements ReactiveStream {
     // MSE may already be on screen, the WebRTC track still has to prove it renders
     if (stream.getVideoTracks().length > 0) {
       this.awaitingWebRTCFrame = true;
-      // go2rtc replays no GOP to WebRTC, its first frame waits for the camera's next keyframe
+      // a source go2rtc holds no GOP of shows its first frame only at the camera's next keyframe
       if (this.webrtcTookOver()) this.startConnectTimeout();
       this.resetHealthBaseline(video);
       this.watchFirstFrame(video);
