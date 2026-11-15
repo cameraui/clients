@@ -26,7 +26,7 @@
     "prepublishOnly": "npm i --package-lock-only && npm run lint && npm run format && npm run build",
     "test": "vitest run --passWithNoTests",
     "test:watch": "vitest",
-    "update": "updates -M npm,pypi,go,cargo,docker --update ./"
+    "update": "updates -M npm,pypi,go,cargo,docker -u"
   },
   "peerDependencies": {
     "@camera.ui/logger": ">=0.0.3",
@@ -43,7 +43,7 @@
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.4.0",
     "@microsoft/api-extractor": "^7.60.1",
-    "@stylistic/eslint-plugin": "^6.0.0",
+    "@stylistic/eslint-plugin": "^5.10.0",
     "@types/webrtc": "^0.0.47",
     "@typescript-eslint/parser": "^8.72.2",
     "@vitejs/plugin-vue": "^6.0.11",
