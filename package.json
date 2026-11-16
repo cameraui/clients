@@ -9,7 +9,7 @@
     "clients/browser"
   ],
   "scripts": {
-    "audit": "npm audit fix && npm audit fix --workspaces",
+    "audit": "npm audit fix --min-release-age=0 && npm audit fix --min-release-age=0 --workspaces",
     "build": "npm run build -w @camera.ui/logger && npm run build -w @camera.ui/transport && npm run build -w @camera.ui/browser",
     "format": "npm run format --workspaces --if-present",
     "install-updates": "npm i --save",
@@ -37,5 +37,11 @@
   },
   "overrides": {
     "@vue/language-core": "$@vue/language-core"
+  },
+  "allowScripts": {
+    "esbuild": true,
+    "fsevents": true,
+    "msgpackr-extract": true,
+    "protobufjs": true
   }
 }
