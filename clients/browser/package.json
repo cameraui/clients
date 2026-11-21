@@ -78,7 +78,9 @@
     "camera.ui",
     "vue",
     "browser",
-    "client"
+    "client",
+    "rpc",
+    "composables"
   ],
   "license": "MIT",
   "repository": {
