@@ -15,6 +15,9 @@ import {
   ClassifierProperty,
   ColdProperty,
   ContactProperty,
+  CoverKind,
+  CoverProperty,
+  CoverState,
   DisplayProperty,
   DoorbellProperty,
   FaceProperty,
@@ -46,6 +49,9 @@ import {
   SwitchProperty,
   TamperProperty,
   TemperatureProperty,
+  ThermostatAction,
+  ThermostatMode,
+  ThermostatProperty,
   VibrationProperty,
 } from '@camera.ui/sdk';
 import { checkPropertyWrite } from '@camera.ui/sdk/internal';
@@ -72,6 +78,7 @@ import type {
   ClassifierSensorProperties,
   ColdSensorProperties,
   ContactSensorProperties,
+  CoverControlProperties,
   Detection,
   DisplayControlProperties,
   DoorbellTriggerProperties,
@@ -107,6 +114,7 @@ import type {
   SwitchControlProperties,
   TamperSensorProperties,
   TemperatureInfoProperties,
+  ThermostatControlProperties,
   VibrationSensorProperties,
 } from '@camera.ui/sdk';
 import type { PropertyChangedEvent } from '@camera.ui/sdk/internal';
@@ -423,6 +431,45 @@ export interface ReactiveGarageControl extends ReactiveSensor<GarageControlPrope
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
+export interface ReactiveCoverControl extends ReactiveSensor<CoverControlProperties> {
+  readonly type: typeof SensorType.Cover;
+  getProperty(property: typeof CoverProperty.CurrentState): CoverState | undefined;
+  getProperty(property: typeof CoverProperty.TargetState): CoverState | undefined;
+  getProperty(property: typeof CoverProperty.CurrentPosition): number | undefined;
+  getProperty(property: typeof CoverProperty.TargetPosition): number | undefined;
+  getProperty(property: typeof CoverProperty.CurrentTilt): number | undefined;
+  getProperty(property: typeof CoverProperty.TargetTilt): number | undefined;
+  getProperty(property: typeof CoverProperty.ObstructionDetected): boolean | undefined;
+  getProperty(property: typeof CoverProperty.Kind): CoverKind | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof CoverProperty.TargetState, value: CoverState): Promise<void>;
+  setProperty(property: typeof CoverProperty.TargetPosition, value: number): Promise<void>;
+  setProperty(property: typeof CoverProperty.TargetTilt, value: number): Promise<void>;
+  setProperty(property: typeof CoverProperty.Stop, value: true): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
+export interface ReactiveThermostatControl extends ReactiveSensor<ThermostatControlProperties> {
+  readonly type: typeof SensorType.Thermostat;
+  getProperty(property: typeof ThermostatProperty.CurrentTemperature): number | undefined;
+  getProperty(property: typeof ThermostatProperty.TargetTemperature): number | undefined;
+  getProperty(property: typeof ThermostatProperty.TargetTemperatureLow): number | undefined;
+  getProperty(property: typeof ThermostatProperty.TargetTemperatureHigh): number | undefined;
+  getProperty(property: typeof ThermostatProperty.Mode): ThermostatMode | undefined;
+  getProperty(property: typeof ThermostatProperty.Action): ThermostatAction | undefined;
+  getProperty(property: typeof ThermostatProperty.CurrentHumidity): number | undefined;
+  getProperty(property: typeof ThermostatProperty.Preset): string | undefined;
+  getProperty(property: typeof ThermostatProperty.FanMode): string | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof ThermostatProperty.TargetTemperature, value: number): Promise<void>;
+  setProperty(property: typeof ThermostatProperty.TargetTemperatureLow, value: number): Promise<void>;
+  setProperty(property: typeof ThermostatProperty.TargetTemperatureHigh, value: number): Promise<void>;
+  setProperty(property: typeof ThermostatProperty.Mode, value: ThermostatMode): Promise<void>;
+  setProperty(property: typeof ThermostatProperty.Preset, value: string): Promise<void>;
+  setProperty(property: typeof ThermostatProperty.FanMode, value: string): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
 export interface ReactiveButtonTrigger extends ReactiveSensor<ButtonTriggerProperties> {
   readonly type: typeof SensorType.Button;
   getProperty(property: typeof ButtonProperty.Press): ButtonPress | '' | undefined;
@@ -519,6 +566,8 @@ export const isReactivePowerSensor = createSensorTypeGuard<ReactivePowerSensor>(
 export const isReactiveIlluminanceInfo = createSensorTypeGuard<ReactiveIlluminanceInfo>(SensorType.Illuminance);
 export const isReactiveCarbonDioxideInfo = createSensorTypeGuard<ReactiveCarbonDioxideInfo>(SensorType.CarbonDioxide);
 export const isReactiveGarageControl = createSensorTypeGuard<ReactiveGarageControl>(SensorType.Garage);
+export const isReactiveCoverControl = createSensorTypeGuard<ReactiveCoverControl>(SensorType.Cover);
+export const isReactiveThermostatControl = createSensorTypeGuard<ReactiveThermostatControl>(SensorType.Thermostat);
 export const isReactiveButtonTrigger = createSensorTypeGuard<ReactiveButtonTrigger>(SensorType.Button);
 export const isReactiveAccessTrigger = createSensorTypeGuard<ReactiveAccessTrigger>(SensorType.Access);
 export const isReactiveGlassBreakSensor = createSensorTypeGuard<ReactiveGlassBreakSensor>(SensorType.GlassBreak);
