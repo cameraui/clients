@@ -1,5 +1,7 @@
 import { vi } from 'vitest';
 
+import type { Mock } from 'vitest';
+
 export const VIDEO_TIMESCALE = 90_000;
 export const H264_MIME = 'video/mp4; codecs="avc1.640029"';
 export const H265_MIME = 'video/mp4; codecs="hvc1.1.6.L153.B0"';
@@ -627,13 +629,20 @@ export class FakeCanvas {
   }
 }
 
+interface FakeBitmap {
+  id: number;
+  width: number;
+  height: number;
+  close: Mock<() => void>;
+}
+
 export class FakeImageDecoder {
   calls = 0;
 
   private waiting: (() => void)[] = [];
   private held = false;
 
-  readonly createImageBitmap = vi.fn(async (blob: Blob) => {
+  readonly createImageBitmap: Mock<(blob: Blob) => Promise<FakeBitmap>> = vi.fn(async (blob: Blob) => {
     this.calls++;
     const view = new DataView(await blob.arrayBuffer());
     const bitmap = { id: view.getUint16(2), width: view.getUint16(4), height: view.getUint16(6), close: vi.fn() };

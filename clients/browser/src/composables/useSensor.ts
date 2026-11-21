@@ -1,17 +1,27 @@
 import {
+  AccessMethod,
+  AccessProperty,
+  AccessResult,
+  AirQualityLevel,
+  AirQualityProperty,
   AudioProperty,
   BatteryProperty,
+  ButtonPress,
+  ButtonProperty,
   CarbonDioxideProperty,
   CarbonMonoxideProperty,
   ChargingState,
+  ChimeProperty,
   ClassifierProperty,
   ColdProperty,
   ContactProperty,
+  DisplayProperty,
   DoorbellProperty,
   FaceProperty,
   GarageProperty,
   GarageState,
   GasProperty,
+  GlassBreakProperty,
   HeatProperty,
   HumidityProperty,
   IlluminanceProperty,
@@ -49,19 +59,25 @@ import { extractCameraId } from './utils.js';
 
 import type { RPCClient } from '@camera.ui/rpc';
 import type {
+  AccessTriggerProperties,
+  AirQualityInfoProperties,
   AudioSensorProperties,
   BatteryInfoProperties,
+  ButtonTriggerProperties,
   CarbonDioxideInfoProperties,
   CarbonMonoxideSensorProperties,
+  ChimeControlProperties,
   ClassifierSensorProperties,
   ColdSensorProperties,
   ContactSensorProperties,
   Detection,
+  DisplayControlProperties,
   DoorbellTriggerProperties,
   FaceDetection,
   FaceSensorProperties,
   GarageControlProperties,
   GasSensorProperties,
+  GlassBreakSensorProperties,
   HeatSensorProperties,
   HumidityInfoProperties,
   IlluminanceInfoProperties,
@@ -387,6 +403,59 @@ export interface ReactiveGarageControl extends ReactiveSensor<GarageControlPrope
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
+export interface ReactiveButtonTrigger extends ReactiveSensor<ButtonTriggerProperties> {
+  readonly type: typeof SensorType.Button;
+  getProperty(property: typeof ButtonProperty.Press): ButtonPress | '' | undefined;
+  getProperty(property: typeof ButtonProperty.Index): number | undefined;
+  getProperty(property: string): unknown;
+}
+
+export interface ReactiveAccessTrigger extends ReactiveSensor<AccessTriggerProperties> {
+  readonly type: typeof SensorType.Access;
+  getProperty(property: typeof AccessProperty.Result): AccessResult | '' | undefined;
+  getProperty(property: typeof AccessProperty.Method): AccessMethod | '' | undefined;
+  getProperty(property: typeof AccessProperty.User): string | undefined;
+  getProperty(property: string): unknown;
+}
+
+export interface ReactiveGlassBreakSensor extends ReactiveSensor<GlassBreakSensorProperties> {
+  readonly type: typeof SensorType.GlassBreak;
+  getProperty(property: typeof GlassBreakProperty.Detected): boolean | undefined;
+  getProperty(property: string): unknown;
+}
+
+export interface ReactiveAirQualityInfo extends ReactiveSensor<AirQualityInfoProperties> {
+  readonly type: typeof SensorType.AirQuality;
+  getProperty(property: typeof AirQualityProperty.Level): AirQualityLevel | '' | undefined;
+  getProperty(
+    property:
+      typeof AirQualityProperty.Aqi | typeof AirQualityProperty.Pm25 | typeof AirQualityProperty.Pm10 | typeof AirQualityProperty.Voc | typeof AirQualityProperty.No2,
+  ): number | undefined;
+  getProperty(property: string): unknown;
+}
+
+export interface ReactiveChimeControl extends ReactiveSensor<ChimeControlProperties> {
+  readonly type: typeof SensorType.Chime;
+  getProperty(property: typeof ChimeProperty.Active): boolean | undefined;
+  getProperty(property: typeof ChimeProperty.Tone): string | undefined;
+  getProperty(property: typeof ChimeProperty.Volume | typeof ChimeProperty.Repeat): number | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof ChimeProperty.Active, value: boolean): Promise<void>;
+  setProperty(property: typeof ChimeProperty.Tone, value: string): Promise<void>;
+  setProperty(property: typeof ChimeProperty.Volume | typeof ChimeProperty.Repeat, value: number): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
+export interface ReactiveDisplayControl extends ReactiveSensor<DisplayControlProperties> {
+  readonly type: typeof SensorType.Display;
+  getProperty(property: typeof DisplayProperty.Message | typeof DisplayProperty.Preset): string | undefined;
+  getProperty(property: typeof DisplayProperty.Duration): number | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof DisplayProperty.Message | typeof DisplayProperty.Preset, value: string): Promise<void>;
+  setProperty(property: typeof DisplayProperty.Duration, value: number): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
 function createSensorTypeGuard<T extends ReactiveSensor<any>>(sensorType: SensorType) {
   return (sensor: ReactiveSensor<any>): sensor is T => sensor.type === sensorType;
 }
@@ -422,6 +491,12 @@ export const isReactivePowerSensor = createSensorTypeGuard<ReactivePowerSensor>(
 export const isReactiveIlluminanceInfo = createSensorTypeGuard<ReactiveIlluminanceInfo>(SensorType.Illuminance);
 export const isReactiveCarbonDioxideInfo = createSensorTypeGuard<ReactiveCarbonDioxideInfo>(SensorType.CarbonDioxide);
 export const isReactiveGarageControl = createSensorTypeGuard<ReactiveGarageControl>(SensorType.Garage);
+export const isReactiveButtonTrigger = createSensorTypeGuard<ReactiveButtonTrigger>(SensorType.Button);
+export const isReactiveAccessTrigger = createSensorTypeGuard<ReactiveAccessTrigger>(SensorType.Access);
+export const isReactiveGlassBreakSensor = createSensorTypeGuard<ReactiveGlassBreakSensor>(SensorType.GlassBreak);
+export const isReactiveAirQualityInfo = createSensorTypeGuard<ReactiveAirQualityInfo>(SensorType.AirQuality);
+export const isReactiveChimeControl = createSensorTypeGuard<ReactiveChimeControl>(SensorType.Chime);
+export const isReactiveDisplayControl = createSensorTypeGuard<ReactiveDisplayControl>(SensorType.Display);
 
 export interface ReactiveSensorManager {
   readonly sensors: ComputedRef<ReactiveSensor[]>;
