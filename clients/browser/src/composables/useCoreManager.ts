@@ -19,5 +19,6 @@ export function useCoreManager(): ReactiveCoreManager {
     getRestoreGeneration: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getRestoreGeneration()),
     getInstanceId: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getInstanceId()),
     getLanguage: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getLanguage()),
+    getUnitSystem: () => rpcCall(ctx.rpc, (rpc) => proxy(rpc).getUnitSystem()),
   };
 }

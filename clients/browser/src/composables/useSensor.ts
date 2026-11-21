@@ -34,6 +34,7 @@ import {
   ObjectProperty,
   OccupancyProperty,
   PowerProperty,
+  PresenceProperty,
   ProblemProperty,
   PTZProperty,
   SecuritySystemProperty,
@@ -90,6 +91,7 @@ import type {
   ObjectSensorProperties,
   OccupancySensorProperties,
   PowerSensorProperties,
+  PresenceSensorProperties,
   ProblemSensorProperties,
   PTZControlProperties,
   PTZDirection,
@@ -434,6 +436,13 @@ export interface ReactiveAirQualityInfo extends ReactiveSensor<AirQualityInfoPro
   getProperty(property: string): unknown;
 }
 
+export interface ReactivePresenceSensor extends ReactiveSensor<PresenceSensorProperties> {
+  readonly type: typeof SensorType.Presence;
+  getProperty(property: typeof PresenceProperty.Detected): boolean | undefined;
+  getProperty(property: typeof PresenceProperty.Zone): string | undefined;
+  getProperty(property: string): unknown;
+}
+
 export interface ReactiveChimeControl extends ReactiveSensor<ChimeControlProperties> {
   readonly type: typeof SensorType.Chime;
   getProperty(property: typeof ChimeProperty.Active): boolean | undefined;
@@ -495,6 +504,7 @@ export const isReactiveButtonTrigger = createSensorTypeGuard<ReactiveButtonTrigg
 export const isReactiveAccessTrigger = createSensorTypeGuard<ReactiveAccessTrigger>(SensorType.Access);
 export const isReactiveGlassBreakSensor = createSensorTypeGuard<ReactiveGlassBreakSensor>(SensorType.GlassBreak);
 export const isReactiveAirQualityInfo = createSensorTypeGuard<ReactiveAirQualityInfo>(SensorType.AirQuality);
+export const isReactivePresenceSensor = createSensorTypeGuard<ReactivePresenceSensor>(SensorType.Presence);
 export const isReactiveChimeControl = createSensorTypeGuard<ReactiveChimeControl>(SensorType.Chime);
 export const isReactiveDisplayControl = createSensorTypeGuard<ReactiveDisplayControl>(SensorType.Display);
 
