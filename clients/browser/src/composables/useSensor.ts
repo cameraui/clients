@@ -33,6 +33,7 @@ import {
   MotionProperty,
   ObjectProperty,
   OccupancyProperty,
+  OutletProperty,
   PowerProperty,
   PresenceProperty,
   ProblemProperty,
@@ -85,11 +86,14 @@ import type {
   LeakSensorProperties,
   LicensePlateDetection,
   LicensePlateSensorProperties,
+  LightColor,
+  LightColorMode,
   LightControlProperties,
   LockControlProperties,
   MotionSensorProperties,
   ObjectSensorProperties,
   OccupancySensorProperties,
+  OutletControlProperties,
   PowerSensorProperties,
   PresenceSensorProperties,
   ProblemSensorProperties,
@@ -183,9 +187,14 @@ export interface ReactiveLightControl extends ReactiveSensor<LightControlPropert
   readonly type: typeof SensorType.Light;
   getProperty(property: typeof LightProperty.On): boolean | undefined;
   getProperty(property: typeof LightProperty.Brightness): number | undefined;
+  getProperty(property: typeof LightProperty.ColorTemperature): number | undefined;
+  getProperty(property: typeof LightProperty.Color): LightColor | undefined;
+  getProperty(property: typeof LightProperty.ColorMode): LightColorMode | undefined;
   getProperty(property: string): unknown;
   setProperty(property: typeof LightProperty.On, value: boolean): Promise<void>;
   setProperty(property: typeof LightProperty.Brightness, value: number): Promise<void>;
+  setProperty(property: typeof LightProperty.ColorTemperature, value: number): Promise<void>;
+  setProperty(property: typeof LightProperty.Color, value: LightColor): Promise<void>;
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
@@ -284,6 +293,15 @@ export interface ReactiveSwitchControl extends ReactiveSensor<SwitchControlPrope
   getProperty(property: typeof SwitchProperty.On): boolean | undefined;
   getProperty(property: string): unknown;
   setProperty(property: typeof SwitchProperty.On, value: boolean): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
+export interface ReactiveOutletControl extends ReactiveSensor<OutletControlProperties> {
+  readonly type: typeof SensorType.Outlet;
+  getProperty(property: typeof OutletProperty.On): boolean | undefined;
+  getProperty(property: typeof OutletProperty.InUse): boolean | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof OutletProperty.On, value: boolean): Promise<void>;
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
@@ -482,6 +500,7 @@ export const isReactiveLicensePlateSensor = createSensorTypeGuard<ReactiveLicens
 export const isReactiveClassifierSensor = createSensorTypeGuard<ReactiveClassifierSensor>(SensorType.Classifier);
 export const isReactivePTZControl = createSensorTypeGuard<ReactivePTZControl>(SensorType.PTZ);
 export const isReactiveSwitchControl = createSensorTypeGuard<ReactiveSwitchControl>(SensorType.Switch);
+export const isReactiveOutletControl = createSensorTypeGuard<ReactiveOutletControl>(SensorType.Outlet);
 export const isReactiveLockControl = createSensorTypeGuard<ReactiveLockControl>(SensorType.Lock);
 export const isReactiveSecuritySystem = createSensorTypeGuard<ReactiveSecuritySystem>(SensorType.SecuritySystem);
 export const isReactiveTemperatureInfo = createSensorTypeGuard<ReactiveTemperatureInfo>(SensorType.Temperature);
