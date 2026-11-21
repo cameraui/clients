@@ -37,6 +37,7 @@ function fakeRpc(sensors: typeof SENSORS = SENSORS) {
   const getSensorStates = vi.fn(async (): Promise<Record<string, unknown>> => states());
   // viewers may not call it, so the client never should
   const getSensorState = vi.fn(async (_sensorId: string): Promise<unknown> => undefined);
+  const updateValue = vi.fn(async (_property: string, _value: unknown): Promise<void> => {});
   const failSubscribe = new Set<string>();
   const blockedSubscribe = new Map<string, Promise<void>>();
 
@@ -49,7 +50,7 @@ function fakeRpc(sensors: typeof SENSORS = SENSORS) {
       listeners.set(subject, set);
       return () => set.delete(cb);
     },
-    createProxy: () => ({ getSensors, getSensorStates, getSensorState }),
+    createProxy: () => ({ getSensors, getSensorStates, getSensorState, updateValue }),
   } as unknown as RPCClient;
 
   function active(): number {
@@ -104,6 +105,7 @@ function fakeRpc(sensors: typeof SENSORS = SENSORS) {
     getSensors,
     getSensorStates,
     getSensorState,
+    updateValue,
     failSubscribe,
     offline,
     active,
@@ -325,6 +327,43 @@ describe('live sensor scopes', () => {
     expect(sensor.capabilities.value).toEqual(['b']);
     first.stop();
     second.stop();
+  });
+
+  it('follow the property specs and keep a spec event that is newer than the snapshot', async () => {
+    const rpc = fakeRpc();
+
+    const first = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.result.sensor.value!.propertySpecs.value).toEqual({});
+    const snapshot = deferred<Record<string, unknown>>();
+    rpc.getSensorStates.mockReturnValueOnce(snapshot.promise);
+    const second = inContext(rpc.client, () => useMotionSensor('cam-2'));
+    await vi.advanceTimersByTimeAsync(0);
+
+    const narrowed = { level: { type: 'number', min: 0, max: 50, step: 5 } };
+    rpc.emit(REGISTRY, { type: 'sensor:specs:changed', data: { sensorId: 'motion-2', sensorType: SensorType.Motion, propertySpecs: narrowed } });
+    snapshot.resolve({ 'motion-2': { type: SensorType.Motion, properties: {}, capabilities: [], propertySpecs: {} } });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(second.result.sensor.value!.propertySpecs.value).toEqual(narrowed);
+    first.stop();
+    second.stop();
+  });
+
+  it('check a write against the property specs before it goes to the plugin', async () => {
+    const rpc = fakeRpc();
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    rpc.emit(REGISTRY, {
+      type: 'sensor:specs:changed',
+      data: { sensorId: 'motion-1', sensorType: SensorType.Motion, propertySpecs: { level: { type: 'number', min: 0, max: 50, step: 5 } } },
+    });
+
+    const sensor = result.sensor.value!;
+    await expect(sensor.setProperty('level', 60)).rejects.toThrow(/at most 50/);
+    await sensor.setProperty('level', 12);
+    expect(rpc.updateValue.mock.calls).toEqual([['level', 10]]);
+    stop();
   });
 
   it('ignore a snapshot that belongs to an earlier subscription', async () => {

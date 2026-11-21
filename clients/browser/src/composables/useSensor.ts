@@ -36,6 +36,7 @@ import {
   TemperatureProperty,
   VibrationProperty,
 } from '@camera.ui/sdk';
+import { checkPropertyWrite } from '@camera.ui/sdk/internal';
 import { tryOnScopeDispose } from '@vueuse/core';
 import { computed, ref, shallowReactive, shallowRef, toValue, watch } from 'vue';
 
@@ -78,6 +79,7 @@ import type {
   PTZDirection,
   PTZPosition,
   SecuritySystemProperties,
+  SensorPropertySpec,
   SirenControlProperties,
   SmokeSensorProperties,
   SwitchControlProperties,
@@ -96,6 +98,7 @@ import type {
   SensorDisplayNameChangedEvent,
   SensorExposedChangedEvent,
   SensorRefreshedState,
+  SensorSpecsChangedEvent,
   StoredSensorData,
 } from '../server/index.js';
 import type { ReactiveCameraDeviceContext } from './useCamera.js';
@@ -123,7 +126,8 @@ export interface SensorEventMessage {
     | 'sensor:displayName:changed'
     | 'sensor:capabilities:changed'
     | 'sensor:assignment:changed'
-    | 'sensor:exposed:changed';
+    | 'sensor:exposed:changed'
+    | 'sensor:specs:changed';
   data:
     | PropertyChangedEvent
     | SensorAddedEvent
@@ -132,7 +136,8 @@ export interface SensorEventMessage {
     | SensorDisplayNameChangedEvent
     | SensorCapabilitiesChangedEvent
     | SensorAssignmentChangedEvent
-    | SensorExposedChangedEvent;
+    | SensorExposedChangedEvent
+    | SensorSpecsChangedEvent;
 }
 
 export interface ReactiveSensor<TProperties extends object = Record<string, unknown>> {
@@ -147,6 +152,7 @@ export interface ReactiveSensor<TProperties extends object = Record<string, unkn
   readonly exposed: Ref<boolean>;
   readonly connected: Ref<boolean>;
   readonly capabilities: Ref<string[]>;
+  readonly propertySpecs: Ref<Record<string, SensorPropertySpec>>;
   readonly properties: TProperties;
   getProperty<T = unknown>(property: string): T | undefined;
   setProperty(property: string, value: unknown): Promise<void>;
@@ -463,6 +469,7 @@ function sameIdentity(sensor: ReactiveSensor, data: StoredSensorData): boolean {
 function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedState, rpcRef: ShallowRef<RPCClient | undefined>): InternalReactiveSensor {
   const displayName = ref(state.displayName ?? data.displayName ?? data.name);
   const capabilities = ref<string[]>(state.capabilities ?? data.capabilities ?? []);
+  const propertySpecs = shallowRef(state.propertySpecs ?? data.propertySpecs ?? {});
   const assignedCameraIds = ref<string[]>([...data.assignedCameraIds]);
   const exposed = ref(data.exposed);
   const connected = ref(data.connected);
@@ -487,6 +494,7 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
     exposed,
     connected,
     capabilities,
+    propertySpecs,
     properties,
 
     getProperty<T = unknown>(property: string): T | undefined {
@@ -494,10 +502,11 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
     },
 
     async setProperty(property: string, value: unknown): Promise<void> {
+      const checked = checkPropertyWrite(propertySpecs.value, property, value);
       // updateValue is the sdk sensor's external write entry, control sensors route it to their setters
       const sensorNamespace = `plugin.${data.pluginId}.sensor.${data.id}.rpc`;
       await rpcCall(rpcRef, (client) =>
-        client.createProxy<{ updateValue(property: string, value: unknown): Promise<void> }>(sensorNamespace).updateValue(property, value),
+        client.createProxy<{ updateValue(property: string, value: unknown): Promise<void> }>(sensorNamespace).updateValue(property, checked),
       );
     },
 
@@ -533,6 +542,8 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
         if (!(property in nextProperties)) delete properties[property];
       }
       Object.assign(properties, nextProperties);
+
+      propertySpecs.value = nextState.propertySpecs ?? next.propertySpecs ?? {};
 
       const nextCapabilities = nextState.capabilities ?? next.capabilities ?? [];
       if (!sameList(capabilities.value, nextCapabilities)) {
@@ -694,6 +705,9 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
       sensor.capabilities.value = capabilities;
       sensor._notifyCapabilitiesChanged();
     }
+    if (state.propertySpecs && !changed.has('sensor:specs:changed')) {
+      sensor.propertySpecs.value = state.propertySpecs;
+    }
   }
 
   function retryRefresh(sensorId: string): void {
@@ -820,6 +834,12 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
       const event = message.data as SensorExposedChangedEvent;
       const sensor = sensorMap.value.get(event.sensorId);
       if (sensor) sensor.exposed.value = event.exposed;
+    } else if (message.type === 'sensor:specs:changed') {
+      const event = message.data as SensorSpecsChangedEvent;
+      const sensor = sensorMap.value.get(event.sensorId);
+      if (!sensor) return;
+      refreshing.get(event.sensorId)?.add(message.type);
+      sensor.propertySpecs.value = event.propertySpecs;
     }
   }
 
