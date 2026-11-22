@@ -28,6 +28,9 @@ import {
   GasProperty,
   GlassBreakProperty,
   HeatProperty,
+  HumidifierAction,
+  HumidifierKind,
+  HumidifierProperty,
   HumidityProperty,
   IlluminanceProperty,
   LeakProperty,
@@ -95,6 +98,7 @@ import type {
   GasSensorProperties,
   GlassBreakSensorProperties,
   HeatSensorProperties,
+  HumidifierControlProperties,
   HumidityInfoProperties,
   IlluminanceInfoProperties,
   LeakSensorProperties,
@@ -521,6 +525,21 @@ export interface ReactiveSceneControl extends ReactiveSensor<SceneControlPropert
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
+export interface ReactiveHumidifierControl extends ReactiveSensor<HumidifierControlProperties> {
+  readonly type: typeof SensorType.Humidifier;
+  getProperty(property: typeof HumidifierProperty.On): boolean | undefined;
+  getProperty(property: typeof HumidifierProperty.TargetHumidity): number | undefined;
+  getProperty(property: typeof HumidifierProperty.CurrentHumidity): number | undefined;
+  getProperty(property: typeof HumidifierProperty.Action): HumidifierAction | undefined;
+  getProperty(property: typeof HumidifierProperty.Mode): string | undefined;
+  getProperty(property: typeof HumidifierProperty.Kind): HumidifierKind | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof HumidifierProperty.On, value: boolean): Promise<void>;
+  setProperty(property: typeof HumidifierProperty.TargetHumidity, value: number): Promise<void>;
+  setProperty(property: typeof HumidifierProperty.Mode, value: string): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
 export interface ReactiveButtonTrigger extends ReactiveSensor<ButtonTriggerProperties> {
   readonly type: typeof SensorType.Button;
   getProperty(property: typeof ButtonProperty.Press): ButtonPress | '' | undefined;
@@ -622,6 +641,7 @@ export const isReactiveThermostatControl = createSensorTypeGuard<ReactiveThermos
 export const isReactiveFanControl = createSensorTypeGuard<ReactiveFanControl>(SensorType.Fan);
 export const isReactiveValveControl = createSensorTypeGuard<ReactiveValveControl>(SensorType.Valve);
 export const isReactiveSceneControl = createSensorTypeGuard<ReactiveSceneControl>(SensorType.Scene);
+export const isReactiveHumidifierControl = createSensorTypeGuard<ReactiveHumidifierControl>(SensorType.Humidifier);
 export const isReactiveButtonTrigger = createSensorTypeGuard<ReactiveButtonTrigger>(SensorType.Button);
 export const isReactiveAccessTrigger = createSensorTypeGuard<ReactiveAccessTrigger>(SensorType.Access);
 export const isReactiveGlassBreakSensor = createSensorTypeGuard<ReactiveGlassBreakSensor>(SensorType.GlassBreak);
