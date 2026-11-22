@@ -21,6 +21,8 @@ import {
   DisplayProperty,
   DoorbellProperty,
   FaceProperty,
+  FanDirection,
+  FanProperty,
   GarageProperty,
   GarageState,
   GasProperty,
@@ -41,6 +43,7 @@ import {
   PresenceProperty,
   ProblemProperty,
   PTZProperty,
+  SceneProperty,
   SecuritySystemProperty,
   SecuritySystemState,
   SensorType,
@@ -52,6 +55,9 @@ import {
   ThermostatAction,
   ThermostatMode,
   ThermostatProperty,
+  ValveKind,
+  ValveProperty,
+  ValveState,
   VibrationProperty,
 } from '@camera.ui/sdk';
 import { checkPropertyWrite } from '@camera.ui/sdk/internal';
@@ -84,6 +90,7 @@ import type {
   DoorbellTriggerProperties,
   FaceDetection,
   FaceSensorProperties,
+  FanControlProperties,
   GarageControlProperties,
   GasSensorProperties,
   GlassBreakSensorProperties,
@@ -107,6 +114,7 @@ import type {
   PTZControlProperties,
   PTZDirection,
   PTZPosition,
+  SceneControlProperties,
   SecuritySystemProperties,
   SensorPropertySpec,
   SirenControlProperties,
@@ -115,6 +123,7 @@ import type {
   TamperSensorProperties,
   TemperatureInfoProperties,
   ThermostatControlProperties,
+  ValveControlProperties,
   VibrationSensorProperties,
 } from '@camera.ui/sdk';
 import type { PropertyChangedEvent } from '@camera.ui/sdk/internal';
@@ -460,6 +469,7 @@ export interface ReactiveThermostatControl extends ReactiveSensor<ThermostatCont
   getProperty(property: typeof ThermostatProperty.CurrentHumidity): number | undefined;
   getProperty(property: typeof ThermostatProperty.Preset): string | undefined;
   getProperty(property: typeof ThermostatProperty.FanMode): string | undefined;
+  getProperty(property: typeof ThermostatProperty.TargetHumidity): number | undefined;
   getProperty(property: string): unknown;
   setProperty(property: typeof ThermostatProperty.TargetTemperature, value: number): Promise<void>;
   setProperty(property: typeof ThermostatProperty.TargetTemperatureLow, value: number): Promise<void>;
@@ -467,6 +477,47 @@ export interface ReactiveThermostatControl extends ReactiveSensor<ThermostatCont
   setProperty(property: typeof ThermostatProperty.Mode, value: ThermostatMode): Promise<void>;
   setProperty(property: typeof ThermostatProperty.Preset, value: string): Promise<void>;
   setProperty(property: typeof ThermostatProperty.FanMode, value: string): Promise<void>;
+  setProperty(property: typeof ThermostatProperty.TargetHumidity, value: number): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
+export interface ReactiveFanControl extends ReactiveSensor<FanControlProperties> {
+  readonly type: typeof SensorType.Fan;
+  getProperty(property: typeof FanProperty.On): boolean | undefined;
+  getProperty(property: typeof FanProperty.Speed): number | undefined;
+  getProperty(property: typeof FanProperty.Direction): FanDirection | undefined;
+  getProperty(property: typeof FanProperty.Oscillating): boolean | undefined;
+  getProperty(property: typeof FanProperty.Preset): string | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof FanProperty.On, value: boolean): Promise<void>;
+  setProperty(property: typeof FanProperty.Speed, value: number): Promise<void>;
+  setProperty(property: typeof FanProperty.Direction, value: FanDirection): Promise<void>;
+  setProperty(property: typeof FanProperty.Oscillating, value: boolean): Promise<void>;
+  setProperty(property: typeof FanProperty.Preset, value: string): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
+export interface ReactiveValveControl extends ReactiveSensor<ValveControlProperties> {
+  readonly type: typeof SensorType.Valve;
+  getProperty(property: typeof ValveProperty.CurrentState): ValveState | undefined;
+  getProperty(property: typeof ValveProperty.TargetState): ValveState | undefined;
+  getProperty(property: typeof ValveProperty.CurrentPosition): number | undefined;
+  getProperty(property: typeof ValveProperty.TargetPosition): number | undefined;
+  getProperty(property: typeof ValveProperty.Duration): number | undefined;
+  getProperty(property: typeof ValveProperty.Remaining): number | undefined;
+  getProperty(property: typeof ValveProperty.Kind): ValveKind | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof ValveProperty.TargetState, value: ValveState): Promise<void>;
+  setProperty(property: typeof ValveProperty.TargetPosition, value: number): Promise<void>;
+  setProperty(property: typeof ValveProperty.Duration, value: number): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
+export interface ReactiveSceneControl extends ReactiveSensor<SceneControlProperties> {
+  readonly type: typeof SensorType.Scene;
+  getProperty(property: typeof SceneProperty.Active): boolean | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof SceneProperty.Active, value: true): Promise<void>;
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
@@ -568,6 +619,9 @@ export const isReactiveCarbonDioxideInfo = createSensorTypeGuard<ReactiveCarbonD
 export const isReactiveGarageControl = createSensorTypeGuard<ReactiveGarageControl>(SensorType.Garage);
 export const isReactiveCoverControl = createSensorTypeGuard<ReactiveCoverControl>(SensorType.Cover);
 export const isReactiveThermostatControl = createSensorTypeGuard<ReactiveThermostatControl>(SensorType.Thermostat);
+export const isReactiveFanControl = createSensorTypeGuard<ReactiveFanControl>(SensorType.Fan);
+export const isReactiveValveControl = createSensorTypeGuard<ReactiveValveControl>(SensorType.Valve);
+export const isReactiveSceneControl = createSensorTypeGuard<ReactiveSceneControl>(SensorType.Scene);
 export const isReactiveButtonTrigger = createSensorTypeGuard<ReactiveButtonTrigger>(SensorType.Button);
 export const isReactiveAccessTrigger = createSensorTypeGuard<ReactiveAccessTrigger>(SensorType.Access);
 export const isReactiveGlassBreakSensor = createSensorTypeGuard<ReactiveGlassBreakSensor>(SensorType.GlassBreak);
