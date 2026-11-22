@@ -43,6 +43,10 @@ import {
   LightProperty,
   LockProperty,
   LockState,
+  MediaPlayerCommand,
+  MediaPlayerKind,
+  MediaPlayerProperty,
+  MediaPlayerState,
   MotionProperty,
   ObjectProperty,
   OccupancyProperty,
@@ -120,6 +124,7 @@ import type {
   LightColorMode,
   LightControlProperties,
   LockControlProperties,
+  MediaPlayerControlProperties,
   MotionSensorProperties,
   ObjectSensorProperties,
   OccupancySensorProperties,
@@ -606,6 +611,26 @@ export interface ReactiveLawnMowerControl extends ReactiveSensor<LawnMowerContro
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
+export interface ReactiveMediaPlayerControl extends ReactiveSensor<MediaPlayerControlProperties> {
+  readonly type: typeof SensorType.MediaPlayer;
+  getProperty(property: typeof MediaPlayerProperty.On): boolean | undefined;
+  getProperty(property: typeof MediaPlayerProperty.State): MediaPlayerState | undefined;
+  getProperty(property: typeof MediaPlayerProperty.Kind): MediaPlayerKind | undefined;
+  getProperty(property: typeof MediaPlayerProperty.Command): MediaPlayerCommand | '' | undefined;
+  getProperty(property: typeof MediaPlayerProperty.Volume): number | undefined;
+  getProperty(property: typeof MediaPlayerProperty.Muted): boolean | undefined;
+  getProperty(property: typeof MediaPlayerProperty.Source): string | undefined;
+  getProperty(property: typeof MediaPlayerProperty.Title): string | undefined;
+  getProperty(property: typeof MediaPlayerProperty.Artist): string | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof MediaPlayerProperty.On, value: boolean): Promise<void>;
+  setProperty(property: typeof MediaPlayerProperty.Command, value: MediaPlayerCommand): Promise<void>;
+  setProperty(property: typeof MediaPlayerProperty.Volume, value: number): Promise<void>;
+  setProperty(property: typeof MediaPlayerProperty.Muted, value: boolean): Promise<void>;
+  setProperty(property: typeof MediaPlayerProperty.Source, value: string): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
 export interface ReactiveButtonTrigger extends ReactiveSensor<ButtonTriggerProperties> {
   readonly type: typeof SensorType.Button;
   getProperty(property: typeof ButtonProperty.Press): ButtonPress | '' | undefined;
@@ -712,6 +737,7 @@ export const isReactiveAirPurifierControl = createSensorTypeGuard<ReactiveAirPur
 export const isReactiveWaterHeaterControl = createSensorTypeGuard<ReactiveWaterHeaterControl>(SensorType.WaterHeater);
 export const isReactiveVacuumControl = createSensorTypeGuard<ReactiveVacuumControl>(SensorType.Vacuum);
 export const isReactiveLawnMowerControl = createSensorTypeGuard<ReactiveLawnMowerControl>(SensorType.LawnMower);
+export const isReactiveMediaPlayerControl = createSensorTypeGuard<ReactiveMediaPlayerControl>(SensorType.MediaPlayer);
 export const isReactiveButtonTrigger = createSensorTypeGuard<ReactiveButtonTrigger>(SensorType.Button);
 export const isReactiveAccessTrigger = createSensorTypeGuard<ReactiveAccessTrigger>(SensorType.Access);
 export const isReactiveGlassBreakSensor = createSensorTypeGuard<ReactiveGlassBreakSensor>(SensorType.GlassBreak);
