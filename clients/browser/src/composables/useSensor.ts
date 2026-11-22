@@ -35,6 +35,9 @@ import {
   HumidifierProperty,
   HumidityProperty,
   IlluminanceProperty,
+  LawnMowerActivity,
+  LawnMowerCommand,
+  LawnMowerProperty,
   LeakProperty,
   LicensePlateProperty,
   LightProperty,
@@ -60,6 +63,9 @@ import {
   ThermostatAction,
   ThermostatMode,
   ThermostatProperty,
+  VacuumActivity,
+  VacuumCommand,
+  VacuumProperty,
   ValveKind,
   ValveProperty,
   ValveState,
@@ -106,6 +112,7 @@ import type {
   HumidifierControlProperties,
   HumidityInfoProperties,
   IlluminanceInfoProperties,
+  LawnMowerControlProperties,
   LeakSensorProperties,
   LicensePlateDetection,
   LicensePlateSensorProperties,
@@ -132,6 +139,7 @@ import type {
   TamperSensorProperties,
   TemperatureInfoProperties,
   ThermostatControlProperties,
+  VacuumControlProperties,
   ValveControlProperties,
   VibrationSensorProperties,
   WaterHeaterControlProperties,
@@ -578,6 +586,26 @@ export interface ReactiveWaterHeaterControl extends ReactiveSensor<WaterHeaterCo
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
+export interface ReactiveVacuumControl extends ReactiveSensor<VacuumControlProperties> {
+  readonly type: typeof SensorType.Vacuum;
+  getProperty(property: typeof VacuumProperty.Activity): VacuumActivity | undefined;
+  getProperty(property: typeof VacuumProperty.Command): VacuumCommand | '' | undefined;
+  getProperty(property: typeof VacuumProperty.FanSpeed): string | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof VacuumProperty.Command, value: VacuumCommand): Promise<void>;
+  setProperty(property: typeof VacuumProperty.FanSpeed, value: string): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
+export interface ReactiveLawnMowerControl extends ReactiveSensor<LawnMowerControlProperties> {
+  readonly type: typeof SensorType.LawnMower;
+  getProperty(property: typeof LawnMowerProperty.Activity): LawnMowerActivity | undefined;
+  getProperty(property: typeof LawnMowerProperty.Command): LawnMowerCommand | '' | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof LawnMowerProperty.Command, value: LawnMowerCommand): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
 export interface ReactiveButtonTrigger extends ReactiveSensor<ButtonTriggerProperties> {
   readonly type: typeof SensorType.Button;
   getProperty(property: typeof ButtonProperty.Press): ButtonPress | '' | undefined;
@@ -682,6 +710,8 @@ export const isReactiveSceneControl = createSensorTypeGuard<ReactiveSceneControl
 export const isReactiveHumidifierControl = createSensorTypeGuard<ReactiveHumidifierControl>(SensorType.Humidifier);
 export const isReactiveAirPurifierControl = createSensorTypeGuard<ReactiveAirPurifierControl>(SensorType.AirPurifier);
 export const isReactiveWaterHeaterControl = createSensorTypeGuard<ReactiveWaterHeaterControl>(SensorType.WaterHeater);
+export const isReactiveVacuumControl = createSensorTypeGuard<ReactiveVacuumControl>(SensorType.Vacuum);
+export const isReactiveLawnMowerControl = createSensorTypeGuard<ReactiveLawnMowerControl>(SensorType.LawnMower);
 export const isReactiveButtonTrigger = createSensorTypeGuard<ReactiveButtonTrigger>(SensorType.Button);
 export const isReactiveAccessTrigger = createSensorTypeGuard<ReactiveAccessTrigger>(SensorType.Access);
 export const isReactiveGlassBreakSensor = createSensorTypeGuard<ReactiveGlassBreakSensor>(SensorType.GlassBreak);
