@@ -2,6 +2,8 @@ import {
   AccessMethod,
   AccessProperty,
   AccessResult,
+  AirPurifierProperty,
+  AirPurifierState,
   AirQualityLevel,
   AirQualityProperty,
   AudioProperty,
@@ -62,6 +64,8 @@ import {
   ValveProperty,
   ValveState,
   VibrationProperty,
+  WaterHeaterMode,
+  WaterHeaterProperty,
 } from '@camera.ui/sdk';
 import { checkPropertyWrite } from '@camera.ui/sdk/internal';
 import { tryOnScopeDispose } from '@vueuse/core';
@@ -77,6 +81,7 @@ import { extractCameraId } from './utils.js';
 import type { RPCClient } from '@camera.ui/rpc';
 import type {
   AccessTriggerProperties,
+  AirPurifierControlProperties,
   AirQualityInfoProperties,
   AudioSensorProperties,
   BatteryInfoProperties,
@@ -129,6 +134,7 @@ import type {
   ThermostatControlProperties,
   ValveControlProperties,
   VibrationSensorProperties,
+  WaterHeaterControlProperties,
 } from '@camera.ui/sdk';
 import type { PropertyChangedEvent } from '@camera.ui/sdk/internal';
 import type { ComputedRef, MaybeRefOrGetter, Ref, ShallowRef } from 'vue';
@@ -540,6 +546,38 @@ export interface ReactiveHumidifierControl extends ReactiveSensor<HumidifierCont
   setProperty(property: string, value: unknown): Promise<void>;
 }
 
+export interface ReactiveAirPurifierControl extends ReactiveSensor<AirPurifierControlProperties> {
+  readonly type: typeof SensorType.AirPurifier;
+  getProperty(property: typeof AirPurifierProperty.On): boolean | undefined;
+  getProperty(property: typeof AirPurifierProperty.State): AirPurifierState | undefined;
+  getProperty(property: typeof AirPurifierProperty.Speed): number | undefined;
+  getProperty(property: typeof AirPurifierProperty.Auto): boolean | undefined;
+  getProperty(property: typeof AirPurifierProperty.Preset): string | undefined;
+  getProperty(property: typeof AirPurifierProperty.ChildLock): boolean | undefined;
+  getProperty(property: typeof AirPurifierProperty.FilterLife): number | undefined;
+  getProperty(property: typeof AirPurifierProperty.FilterChange): boolean | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof AirPurifierProperty.On, value: boolean): Promise<void>;
+  setProperty(property: typeof AirPurifierProperty.Speed, value: number): Promise<void>;
+  setProperty(property: typeof AirPurifierProperty.Auto, value: boolean): Promise<void>;
+  setProperty(property: typeof AirPurifierProperty.Preset, value: string): Promise<void>;
+  setProperty(property: typeof AirPurifierProperty.ChildLock, value: boolean): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
+export interface ReactiveWaterHeaterControl extends ReactiveSensor<WaterHeaterControlProperties> {
+  readonly type: typeof SensorType.WaterHeater;
+  getProperty(property: typeof WaterHeaterProperty.CurrentTemperature): number | undefined;
+  getProperty(property: typeof WaterHeaterProperty.TargetTemperature): number | undefined;
+  getProperty(property: typeof WaterHeaterProperty.Mode): WaterHeaterMode | undefined;
+  getProperty(property: typeof WaterHeaterProperty.Away): boolean | undefined;
+  getProperty(property: string): unknown;
+  setProperty(property: typeof WaterHeaterProperty.TargetTemperature, value: number): Promise<void>;
+  setProperty(property: typeof WaterHeaterProperty.Mode, value: WaterHeaterMode): Promise<void>;
+  setProperty(property: typeof WaterHeaterProperty.Away, value: boolean): Promise<void>;
+  setProperty(property: string, value: unknown): Promise<void>;
+}
+
 export interface ReactiveButtonTrigger extends ReactiveSensor<ButtonTriggerProperties> {
   readonly type: typeof SensorType.Button;
   getProperty(property: typeof ButtonProperty.Press): ButtonPress | '' | undefined;
@@ -642,6 +680,8 @@ export const isReactiveFanControl = createSensorTypeGuard<ReactiveFanControl>(Se
 export const isReactiveValveControl = createSensorTypeGuard<ReactiveValveControl>(SensorType.Valve);
 export const isReactiveSceneControl = createSensorTypeGuard<ReactiveSceneControl>(SensorType.Scene);
 export const isReactiveHumidifierControl = createSensorTypeGuard<ReactiveHumidifierControl>(SensorType.Humidifier);
+export const isReactiveAirPurifierControl = createSensorTypeGuard<ReactiveAirPurifierControl>(SensorType.AirPurifier);
+export const isReactiveWaterHeaterControl = createSensorTypeGuard<ReactiveWaterHeaterControl>(SensorType.WaterHeater);
 export const isReactiveButtonTrigger = createSensorTypeGuard<ReactiveButtonTrigger>(SensorType.Button);
 export const isReactiveAccessTrigger = createSensorTypeGuard<ReactiveAccessTrigger>(SensorType.Access);
 export const isReactiveGlassBreakSensor = createSensorTypeGuard<ReactiveGlassBreakSensor>(SensorType.GlassBreak);
