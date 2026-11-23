@@ -160,6 +160,7 @@ import type {
   SensorDisplayNameChangedEvent,
   SensorExposedChangedEvent,
   SensorRefreshedState,
+  SensorRoomChangedEvent,
   SensorSpecsChangedEvent,
   StoredSensorData,
 } from '../server/index.js';
@@ -189,7 +190,8 @@ export interface SensorEventMessage {
     | 'sensor:capabilities:changed'
     | 'sensor:assignment:changed'
     | 'sensor:exposed:changed'
-    | 'sensor:specs:changed';
+    | 'sensor:specs:changed'
+    | 'sensor:room:changed';
   data:
     | PropertyChangedEvent
     | SensorAddedEvent
@@ -199,7 +201,8 @@ export interface SensorEventMessage {
     | SensorCapabilitiesChangedEvent
     | SensorAssignmentChangedEvent
     | SensorExposedChangedEvent
-    | SensorSpecsChangedEvent;
+    | SensorSpecsChangedEvent
+    | SensorRoomChangedEvent;
 }
 
 export interface ReactiveSensor<TProperties extends object = Record<string, unknown>> {
@@ -211,6 +214,7 @@ export interface ReactiveSensor<TProperties extends object = Record<string, unkn
   readonly pluginId: string;
   readonly boundCameraId?: string;
   readonly assignedCameraIds: Ref<string[]>;
+  readonly roomId: Ref<string | undefined>;
   readonly exposed: Ref<boolean>;
   readonly connected: Ref<boolean>;
   readonly capabilities: Ref<string[]>;
@@ -794,6 +798,7 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
   const capabilities = ref<string[]>(state.capabilities ?? data.capabilities ?? []);
   const propertySpecs = shallowRef(state.propertySpecs ?? data.propertySpecs ?? {});
   const assignedCameraIds = ref<string[]>([...data.assignedCameraIds]);
+  const roomId = ref(data.roomId);
   const exposed = ref(data.exposed);
   const connected = ref(data.connected);
   const properties = shallowReactive<Record<string, unknown>>({ ...state.properties });
@@ -814,6 +819,7 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
     pluginId: data.pluginId,
     boundCameraId: data.boundCameraId,
     assignedCameraIds,
+    roomId,
     exposed,
     connected,
     capabilities,
@@ -857,6 +863,7 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
     _update(next: StoredSensorData, nextState: SensorRefreshedState): void {
       displayName.value = nextState.displayName ?? next.displayName ?? next.name;
       if (!sameList(assignedCameraIds.value, next.assignedCameraIds)) assignedCameraIds.value = [...next.assignedCameraIds];
+      roomId.value = next.roomId;
       exposed.value = next.exposed;
       connected.value = next.connected;
 
@@ -1157,6 +1164,10 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
       const event = message.data as SensorExposedChangedEvent;
       const sensor = sensorMap.value.get(event.sensorId);
       if (sensor) sensor.exposed.value = event.exposed;
+    } else if (message.type === 'sensor:room:changed') {
+      const event = message.data as SensorRoomChangedEvent;
+      const sensor = sensorMap.value.get(event.sensorId);
+      if (sensor) sensor.roomId.value = event.roomId;
     } else if (message.type === 'sensor:specs:changed') {
       const event = message.data as SensorSpecsChangedEvent;
       const sensor = sensorMap.value.get(event.sensorId);
