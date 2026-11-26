@@ -366,6 +366,211 @@ describe('live sensor scopes', () => {
     stop();
   });
 
+  it('show a write at once and keep it until the device reports it', async () => {
+    const rpc = fakeRpc();
+    rpc.seed('motion-1', { level: 10 });
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const answer = deferred<void>();
+    rpc.updateValue.mockReturnValueOnce(answer.promise);
+
+    const sensor = result.sensor.value!;
+    const write = sensor.setProperty('level', 40);
+    expect(sensor.getProperty('level')).toBe(40);
+    expect(sensor.isPending('level')).toBe(true);
+    answer.resolve();
+    await write;
+    expect(sensor.isPending()).toBe(true);
+
+    rpc.write('motion-1', 'level', 40);
+    await flush();
+    expect(sensor.isPending()).toBe(false);
+    expect(sensor.getProperty('level')).toBe(40);
+    stop();
+  });
+
+  it('fall back to the reported value when a write fails or the device ignores it', async () => {
+    const rpc = fakeRpc();
+    rpc.seed('motion-1', { level: 10 });
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const sensor = result.sensor.value!;
+
+    rpc.updateValue.mockRejectedValueOnce(new Error('offline'));
+    await expect(sensor.setProperty('level', 40)).rejects.toThrow('offline');
+    expect(sensor.getProperty('level')).toBe(10);
+    expect(sensor.isPending('level')).toBe(false);
+
+    await sensor.setProperty('level', 50);
+    expect(sensor.getProperty('level')).toBe(50);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(sensor.getProperty('level')).toBe(10);
+    expect(sensor.isPending('level')).toBe(false);
+    stop();
+  });
+
+  it('tell why a held value fell back, and stay quiet when the device confirms or a newer write takes over', async () => {
+    const rpc = fakeRpc();
+    rpc.seed('motion-1', { level: 10 });
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const sensor = result.sensor.value!;
+    const fallbacks: [string, string][] = [];
+    const unsubscribe = sensor.onWriteFallback((property, reason) => fallbacks.push([property, reason]));
+
+    rpc.updateValue.mockRejectedValueOnce(new Error('refused'));
+    await expect(sensor.setProperty('level', 40)).rejects.toThrow('refused');
+    await sensor.setProperty('level', 50);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(fallbacks).toEqual([
+      ['level', 'failed'],
+      ['level', 'unconfirmed'],
+    ]);
+
+    await sensor.setProperty('level', 20);
+    rpc.write('motion-1', 'level', 20);
+    await flush();
+    const first = sensor.setProperty('level', 30);
+    const second = sensor.setProperty('level', 35);
+    await Promise.all([first, second]);
+    rpc.write('motion-1', 'level', 35);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(fallbacks).toHaveLength(2);
+
+    unsubscribe();
+    rpc.updateValue.mockRejectedValueOnce(new Error('refused'));
+    await expect(sensor.setProperty('level', 45)).rejects.toThrow('refused');
+    expect(fallbacks).toHaveLength(2);
+    stop();
+  });
+
+  it('count a value the device reports and drops back at once as taken', async () => {
+    const rpc = fakeRpc();
+    rpc.seed('motion-1', { level: 10 });
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const sensor = result.sensor.value!;
+    const fallbacks: string[] = [];
+    sensor.onWriteFallback((_property, reason) => fallbacks.push(reason));
+
+    await sensor.setProperty('level', 40);
+    rpc.write('motion-1', 'level', 40);
+    rpc.write('motion-1', 'level', 10);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(fallbacks).toEqual([]);
+    expect(sensor.getProperty('level')).toBe(10);
+    stop();
+  });
+
+  it('drop a value on its way without a fallback when the sensor goes offline', async () => {
+    const rpc = fakeRpc();
+    rpc.seed('motion-1', { level: 10 });
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const sensor = result.sensor.value!;
+    const fallbacks: string[] = [];
+    sensor.onWriteFallback((_property, reason) => fallbacks.push(reason));
+
+    await sensor.setProperty('level', 40);
+    expect(sensor.getProperty('level')).toBe(40);
+    rpc.emit('sensors.subject', { type: 'sensor:source:changed', data: { sensorId: 'motion-1', sourceState: 'unavailable' } });
+    await flush();
+    expect(sensor.isPending()).toBe(false);
+    expect(sensor.getProperty('level')).toBe(10);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(fallbacks).toEqual([]);
+    stop();
+  });
+
+  it('refuse a write to a sensor that is not connected', async () => {
+    const rpc = fakeRpc();
+    rpc.seed('motion-1', { level: 10 });
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const sensor = result.sensor.value!;
+
+    rpc.setConnected('motion-1', false);
+    await flush();
+    await expect(sensor.setProperty('level', 40)).rejects.toThrow('not connected');
+    expect(rpc.updateValue).not.toHaveBeenCalled();
+    expect(sensor.getProperty('level')).toBe(10);
+    stop();
+  });
+
+  it('go offline and refuse a write while the device or camera is unreachable', async () => {
+    const rpc = fakeRpc();
+    rpc.seed('motion-1', { level: 10 });
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const sensor = result.sensor.value!;
+    expect(sensor.online.value).toBe(true);
+
+    rpc.emit('sensors.subject', { type: 'sensor:source:changed', data: { sensorId: 'motion-1', sourceState: 'unavailable' } });
+    await flush();
+    expect(sensor.connected.value).toBe(true);
+    expect(sensor.online.value).toBe(false);
+    await expect(sensor.setProperty('level', 40)).rejects.toThrow('not reachable');
+    expect(rpc.updateValue).not.toHaveBeenCalled();
+
+    rpc.emit('sensors.subject', { type: 'sensor:source:changed', data: { sensorId: 'motion-1' } });
+    await flush();
+    expect(sensor.online.value).toBe(true);
+    stop();
+  });
+
+  it('send a command once and show no value in its place', async () => {
+    const rpc = fakeRpc([{ id: 'tv-1', type: SensorType.MediaPlayer, name: 'TV', pluginId: 'p', assignedCameraIds: ['cam-1'], exposed: true, connected: true }]);
+    const { result, stop } = inContext(rpc.client, () => useSensorById('cam-1', 'tv-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const tv = result.sensor.value!;
+
+    const answer = deferred<void>();
+    rpc.updateValue.mockReturnValueOnce(answer.promise);
+    const sent = tv.setProperty('command', 'next');
+    expect(tv.isPending()).toBe(false);
+    answer.resolve();
+    await sent;
+
+    rpc.updateValue.mockRejectedValueOnce(new Error('Not connected'));
+    await expect(tv.setProperty('command', 'next')).rejects.toThrow('Not connected');
+    expect(rpc.updateValue).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it('send a cover stop as a command, the device never reports it back', async () => {
+    const rpc = fakeRpc([{ id: 'blind-1', type: SensorType.Cover, name: 'Blind', pluginId: 'p', assignedCameraIds: ['cam-1'], exposed: true, connected: true }]);
+    const { result, stop } = inContext(rpc.client, () => useSensorById('cam-1', 'blind-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const blind = result.sensor.value!;
+    const fallbacks: string[] = [];
+    blind.onWriteFallback((_property, reason) => fallbacks.push(reason));
+
+    await blind.setProperty('stop', true);
+    expect(blind.isPending()).toBe(false);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(fallbacks).toEqual([]);
+    stop();
+  });
+
+  it('let a newer write take over from one still on its way', async () => {
+    const rpc = fakeRpc();
+    rpc.seed('motion-1', { level: 10 });
+    const { result, stop } = inContext(rpc.client, () => useMotionSensor('cam-1'));
+    await vi.advanceTimersByTimeAsync(0);
+    const first = deferred<void>();
+    rpc.updateValue.mockReturnValueOnce(first.promise);
+    const sensor = result.sensor.value!;
+
+    const slow = sensor.setProperty('level', 30);
+    await sensor.setProperty('level', 60);
+    first.resolve();
+    await slow;
+    expect(sensor.getProperty('level')).toBe(60);
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(sensor.getProperty('level')).toBe(10);
+    stop();
+  });
+
   it('ignore a snapshot that belongs to an earlier subscription', async () => {
     const rpc = fakeRpc();
     const camera = ref('cam-1');

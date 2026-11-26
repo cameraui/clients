@@ -183,6 +183,7 @@ export type {
   UseTerminalOptions,
   UseTerminalReturn,
   UseTerminalSessionsReturn,
+  WriteFallbackReason,
 } from './composables/index.js';
 
 export { createActivityMode, restartConnectedStreams, STREAM_CONFIG } from './streaming/index.js';

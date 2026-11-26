@@ -36,6 +36,7 @@ export type {
   SensorExposedChangedEvent,
   SensorRefreshedState,
   SensorRoomChangedEvent,
+  SensorSourceChangedEvent,
   SensorSpecsChangedEvent,
   StoredSensorData,
 } from '../../../../externals/camera.ui/server/src/rpc/interfaces/sensor.js';

@@ -58,6 +58,7 @@ import {
   SceneProperty,
   SecuritySystemProperty,
   SecuritySystemState,
+  sensorMeta,
   SensorType,
   SirenProperty,
   SmokeProperty,
@@ -77,7 +78,7 @@ import {
   WaterHeaterMode,
   WaterHeaterProperty,
 } from '@camera.ui/sdk';
-import { checkPropertyWrite } from '@camera.ui/sdk/internal';
+import { checkPropertyWrite, isEqual, isSourceReachable, WRITE_CALL_TIMEOUT_MS } from '@camera.ui/sdk/internal';
 import { tryOnScopeDispose } from '@vueuse/core';
 import { computed, ref, shallowReactive, shallowRef, toValue, watch } from 'vue';
 
@@ -138,6 +139,7 @@ import type {
   SceneControlProperties,
   SecuritySystemProperties,
   SensorPropertySpec,
+  SensorSourceState,
   SirenControlProperties,
   SmokeSensorProperties,
   SwitchControlProperties,
@@ -161,6 +163,7 @@ import type {
   SensorExposedChangedEvent,
   SensorRefreshedState,
   SensorRoomChangedEvent,
+  SensorSourceChangedEvent,
   SensorSpecsChangedEvent,
   StoredSensorData,
 } from '../server/index.js';
@@ -191,6 +194,7 @@ export interface SensorEventMessage {
     | 'sensor:assignment:changed'
     | 'sensor:exposed:changed'
     | 'sensor:specs:changed'
+    | 'sensor:source:changed'
     | 'sensor:room:changed';
   data:
     | PropertyChangedEvent
@@ -202,8 +206,11 @@ export interface SensorEventMessage {
     | SensorAssignmentChangedEvent
     | SensorExposedChangedEvent
     | SensorSpecsChangedEvent
+    | SensorSourceChangedEvent
     | SensorRoomChangedEvent;
 }
+
+export type WriteFallbackReason = 'failed' | 'unconfirmed';
 
 export interface ReactiveSensor<TProperties extends object = Record<string, unknown>> {
   readonly id: string;
@@ -217,14 +224,19 @@ export interface ReactiveSensor<TProperties extends object = Record<string, unkn
   readonly roomId: Ref<string | undefined>;
   readonly exposed: Ref<boolean>;
   readonly connected: Ref<boolean>;
+  readonly sourceState: Ref<SensorSourceState | undefined>;
+  // connected and its device or camera reachable
+  readonly online: ComputedRef<boolean>;
   readonly capabilities: Ref<string[]>;
   readonly propertySpecs: Ref<Record<string, SensorPropertySpec>>;
   readonly properties: TProperties;
   getProperty<T = unknown>(property: string): T | undefined;
   setProperty(property: string, value: unknown): Promise<void>;
+  isPending(property?: string): boolean;
   setDisplayName(displayName: string): Promise<void>;
   hasCapability(capability: string): boolean;
   onCapabilitiesChanged(callback: (capabilities: string[]) => void): () => void;
+  onWriteFallback(callback: (property: string, reason: WriteFallbackReason) => void): () => void;
 }
 
 export interface ReactiveLightControl extends ReactiveSensor<LightControlProperties> {
@@ -793,6 +805,11 @@ function sameIdentity(sensor: ReactiveSensor, data: StoredSensorData): boolean {
   );
 }
 
+// a write the device does not report back falls back to the reported value after this long
+const WRITE_SETTLE_MS = 3_000;
+// a tap without a link fails soon instead of firing late
+const WRITE_CONNECT_TIMEOUT_MS = 3_000;
+
 function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedState, rpcRef: ShallowRef<RPCClient | undefined>): InternalReactiveSensor {
   const displayName = ref(state.displayName ?? data.displayName ?? data.name);
   const capabilities = ref<string[]>(state.capabilities ?? data.capabilities ?? []);
@@ -801,13 +818,69 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
   const roomId = ref(data.roomId);
   const exposed = ref(data.exposed);
   const connected = ref(data.connected);
+  const sourceState = ref(data.sourceState);
+  const online = computed(() => connected.value && isSourceReachable(sourceState.value));
   const properties = shallowReactive<Record<string, unknown>>({ ...state.properties });
+  const targets = shallowReactive<Record<string, unknown>>({});
+  const releases = new Map<string, () => void>();
   const capabilityCallbacks: ((capabilities: string[]) => void)[] = [];
+  const fallbackCallbacks = new Set<(property: string, reason: WriteFallbackReason) => void>();
+
+  // a value on its way falls back when the sensor goes offline
+  watch(online, (now) => {
+    if (!now) for (const release of [...releases.values()]) release();
+  });
 
   function notifyCapabilitiesChanged(): void {
     for (const callback of capabilityCallbacks) {
       callback(capabilities.value);
     }
+  }
+
+  function holdTarget(property: string, value: unknown) {
+    releases.get(property)?.();
+    targets[property] = value;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // sync, so a pulse like a scene's active that drops back at once still counts
+    const stop = watch(
+      () => properties[property],
+      (reported) => {
+        if (isEqual(reported, value)) release();
+      },
+      { flush: 'sync' },
+    );
+
+    function release(fallback?: WriteFallbackReason): void {
+      stop();
+      clearTimeout(timer);
+      if (releases.get(property) !== release) return;
+      releases.delete(property);
+      delete targets[property];
+      if (fallback) for (const callback of fallbackCallbacks) callback(property, fallback);
+    }
+
+    releases.set(property, release);
+    return {
+      failed: () => release('failed'),
+      sent: () => {
+        if (isEqual(properties[property], value)) release();
+        else timer = setTimeout(() => release('unconfirmed'), WRITE_SETTLE_MS);
+      },
+    };
+  }
+
+  function writeValue(property: string, value: unknown, command: boolean): Promise<void> {
+    // updateValue is the sdk sensor's external write entry, control sensors route it to their setters
+    const sensorNamespace = `plugin.${data.pluginId}.sensor.${data.id}.rpc`;
+    return rpcCall(
+      rpcRef,
+      (client) =>
+        client
+          .createProxy<{ updateValue(property: string, value: unknown): Promise<void> }>(sensorNamespace, { timeout: WRITE_CALL_TIMEOUT_MS })
+          .updateValue(property, value),
+      // a command that may have run must not run twice
+      { connectTimeoutMs: WRITE_CONNECT_TIMEOUT_MS, maxRetries: command ? 0 : undefined },
+    );
   }
 
   return {
@@ -822,21 +895,34 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
     roomId,
     exposed,
     connected,
+    sourceState,
+    online,
     capabilities,
     propertySpecs,
     properties,
 
     getProperty<T = unknown>(property: string): T | undefined {
-      return properties[property] as T | undefined;
+      return (property in targets ? targets[property] : properties[property]) as T | undefined;
     },
 
     async setProperty(property: string, value: unknown): Promise<void> {
+      if (!connected.value) throw new Error(`${displayName.value} is not connected`);
+      if (!online.value) throw new Error(`${displayName.value} is not reachable`);
       const checked = checkPropertyWrite(propertySpecs.value, property, value);
-      // updateValue is the sdk sensor's external write entry, control sensors route it to their setters
-      const sensorNamespace = `plugin.${data.pluginId}.sensor.${data.id}.rpc`;
-      await rpcCall(rpcRef, (client) =>
-        client.createProxy<{ updateValue(property: string, value: unknown): Promise<void> }>(sensorNamespace).updateValue(property, checked),
-      );
+      if (sensorMeta(data.type)?.properties[property]?.command) return writeValue(property, checked, true);
+
+      const hold = holdTarget(property, checked);
+      try {
+        await writeValue(property, checked, false);
+      } catch (error) {
+        hold.failed();
+        throw error;
+      }
+      hold.sent();
+    },
+
+    isPending(property?: string): boolean {
+      return property === undefined ? Object.keys(targets).length > 0 : property in targets;
     },
 
     async setDisplayName(newDisplayName: string): Promise<void> {
@@ -858,6 +944,13 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
       };
     },
 
+    onWriteFallback(callback: (property: string, reason: WriteFallbackReason) => void): () => void {
+      fallbackCallbacks.add(callback);
+      return () => {
+        fallbackCallbacks.delete(callback);
+      };
+    },
+
     _notifyCapabilitiesChanged: notifyCapabilitiesChanged,
 
     _update(next: StoredSensorData, nextState: SensorRefreshedState): void {
@@ -866,6 +959,7 @@ function createReactiveSensor(data: StoredSensorData, state: SensorRefreshedStat
       roomId.value = next.roomId;
       exposed.value = next.exposed;
       connected.value = next.connected;
+      sourceState.value = next.sourceState;
 
       const nextProperties = nextState.properties ?? {};
       for (const property of Object.keys(properties)) {
@@ -1151,6 +1245,10 @@ function createScopedSensorManager(rpcOrContext: RPCClient | ReactiveCameraDevic
       if (!sensor) return;
       sensor.connected.value = event.connected;
       if (event.connected && refreshOnConnect.delete(sensor.id)) refreshLiveSensor(sensor.id);
+    } else if (message.type === 'sensor:source:changed') {
+      const event = message.data as SensorSourceChangedEvent;
+      const sensor = sensorMap.value.get(event.sensorId);
+      if (sensor) sensor.sourceState.value = event.sourceState;
     } else if (message.type === 'sensor:assignment:changed') {
       const event = message.data as SensorAssignmentChangedEvent;
       const sensor = sensorMap.value.get(event.sensorId);

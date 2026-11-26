@@ -150,6 +150,7 @@ export type {
   UseSensorsReturn,
   UseSensorsTypedReturn,
   UseSensorTypedReturn,
+  WriteFallbackReason,
 } from './useSensor.js';
 export type { UseSnapshotReturn } from './useSnapshot.js';
 export type { ReactiveStorage, StorageRPC, UseStorageReturn } from './useStorage.js';
