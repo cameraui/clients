@@ -32,7 +32,7 @@ export function installConsoleCapture(): void {
     addEventListener?: (type: string, cb: (e: any) => void) => void;
   };
   target.addEventListener?.('error', (e) => {
-    if (!isRecording()) return;
+    if (!isRecording() || /^ResizeObserver loop/.test(e?.message ?? '')) return;
     const where = e?.filename ? ` ${e.filename}:${e.lineno}:${e.colno}` : '';
     pushEntry({ t: Date.now(), level: 'error', scope: 'window', msg: `[onerror] ${e?.message ?? ''}${where}`.trim() });
   });
