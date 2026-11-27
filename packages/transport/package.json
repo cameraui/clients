@@ -55,7 +55,7 @@
     "update": "updates -M npm,pypi,go,cargo,docker -u"
   },
   "dependencies": {
-    "@camera.ui/logger": ">=0.0.3",
+    "@camera.ui/logger": ">=0.0.4",
     "@camera.ui/rpc": ">=1.1.5",
     "axios": ">=1.21.1",
     "socket.io-client": ">=4.8.4"
