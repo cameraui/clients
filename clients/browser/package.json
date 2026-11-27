@@ -43,7 +43,7 @@
     "@camera.ui/transport": "file:../../packages/transport",
     "@eneris/push-receiver": "^4.4.0",
     "@microsoft/api-extractor": "^7.60.1",
-    "@stylistic/eslint-plugin": "^5.10.0",
+    "@stylistic/eslint-plugin": "^6.0.1",
     "@types/webrtc": "^0.0.47",
     "@typescript-eslint/parser": "^8.73.0",
     "@vitejs/plugin-vue": "^6.0.11",
@@ -65,7 +65,7 @@
     "vite": "^8.3.8",
     "vitest": "^5.1.1",
     "vue": "^3.5.46",
-    "vue-tsc": "3.3.11"
+    "vue-tsc": "3.3.14"
   },
   "overrides": {
     "@vue/language-core": "$@vue/language-core"
